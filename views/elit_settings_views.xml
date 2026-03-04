@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_res_config_settings_elit" model="ir.ui.view">
+        <field name="name">res.config.settings.view.form.inherit.elit</field>
+        <field name="model">res.config.settings</field>
+        <field name="inherit_id" ref="stock.res_config_settings_view_form"/>
+        <field name="arch" type="xml">
+
+            <xpath expr="//block[@id='production_lot_info']" position="after">
+                <group string="Integración ELIT" col="4">
+                    <group string="Credenciales API">
+                        <field name="elit_user_id"/>
+                        <field name="elit_token" password="True"/>
+                    </group>
+                    <group string="Conexión">
+                        <field name="elit_api_url"/>
+                        <field name="elit_endpoint"/>
+                    </group>
+                    <group string="Configuración">
+                        <field name="elit_public_categ_parent_id" placeholder="Ej: Computación"/>
+                        <field name="elit_partner_id" domain="[('supplier_rank', '>', 0)]"/>
+                    </group>
+                    <group string="Estado API">
+                        <field name="elit_api_notify_user_id"/>
+                        <div colspan="2">
+                            <span class="text-success fw-bold" invisible="elit_api_status != 'ok'">&#9679; API OK</span>
+                            <span class="text-danger fw-bold" invisible="elit_api_status != 'error'">&#9679; API Error</span>
+                            <span class="text-muted" invisible="elit_api_status != 'unknown'">&#9679; Sin verificar</span>
+                            <field name="elit_api_status" invisible="1"/>
+                        </div>
+                        <field name="elit_api_last_check" readonly="1"/>
+                        <field name="elit_api_last_error" readonly="1" invisible="elit_api_status != 'error'"/>
+                    </group>
+                    <group string="Sincronizaciones">
+                        <div class="text-muted">
+                            Última completa:
+                            <field name="elit_last_full_sync" readonly="1" placeholder="Nunca"/>
+                            <br/>
+                            Última incremental:
+                            <field name="elit_last_incremental_sync" readonly="1" placeholder="Nunca"/>
+                            <br/>
+                            Último offset (full):
+                            <field name="elit_full_offset" readonly="1" placeholder="1"/>
+                            <br/>
+                            Último offset (incremental):
+                            <field name="elit_incremental_offset" readonly="1" placeholder="1"/>
+                            <br/>
+                            Último offset (update stock):
+                            <field name="elit_update_stock_offset" readonly="1" placeholder="0"/>
+                        </div>
+                    </group>
+                </group>
+            </xpath>
+        </field>
+    </record>
+</odoo>

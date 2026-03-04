@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_elit_sync_wizard_form" model="ir.ui.view">
+        <field name="name">elit.sync.wizard.form</field>
+        <field name="model">elit.sync.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Sincronizar Productos ELIT">
+                <group>
+                    <field name="sync_type"/>
+                    <field name="date_from" invisible="sync_type == 'full'"/>
+                    <field name="offset_start" invisible="sync_type == 'incremental'"/>
+                </group>
+                <footer>
+                    <button name="action_sync" string="Iniciar Sincronización" type="object" class="btn-primary"/>
+                    <button string="Cancelar" class="btn-secondary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_elit_sync_wizard" model="ir.actions.act_window">
+        <field name="name">Sincronizar Productos ELIT</field>
+        <field name="res_model">elit.sync.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+
+    <menuitem
+        id="menu_elit_sync"
+        name="Sincronizar Productos"
+        parent="stock.menu_stock_root"
+        action="action_elit_sync_wizard"
+        sequence="10"/>
+</odoo>
