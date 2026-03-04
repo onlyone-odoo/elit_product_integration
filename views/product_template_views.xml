@@ -16,6 +16,7 @@
             <xpath expr="//field[@name='detailed_type']" position="after">
                 <field name="is_gamer" widget="boolean_button" 
                        options="{'terminology': {'active': 'Producto Gamer', 'inactive': 'No gamer'}}"/>
+                       <field name="elit_product_code" string="Código ELIT"/>
                        <field name="stock_elit" string="Stock en ELIT" readonly="1"/>
             </xpath>
 
@@ -29,6 +30,7 @@
         <field name="inherit_id" ref="product.product_template_tree_view"/>
         <field name="arch" type="xml">
             <field name="default_code" position="after">
+                <field name="elit_product_code" optional="show"/>
                 <field name="elit_brand" optional="show"/>
                 <field name="stock_elit" string="Stock ELIT" optional="show"/>
             </field>

@@ -22,6 +22,12 @@ class ProductTemplate(models.Model):
     elit_warranty_months = fields.Char(
         string="Garantía ELIT", help="Garantía tal como viene de ELIT (ej. 24 MESES)"
     )
+    elit_product_code = fields.Char(
+        string="Código ELIT",
+        index=True,
+        copy=False,
+        help="Código alfanumérico del producto en ELIT (campo 'codigo_alfa' de la API).",
+    )
     elit_last_sync = fields.Datetime(
         string="Última sincronización ELIT",
         readonly=True,
@@ -61,14 +67,23 @@ class ProductTemplate(models.Model):
         updated_products = self.env["product.template"]
 
         for rec in self:
-            if not rec.default_code:
+            elit_code = rec.elit_product_code
+            if not elit_code:
+                partner = self._get_elit_partner()
+                if partner:
+                    si = self.env["product.supplierinfo"].search([
+                        ("partner_id", "=", partner.id),
+                        ("product_tmpl_id", "=", rec.id),
+                    ], limit=1)
+                    elit_code = si.product_code if si else None
+            if not elit_code:
                 _logger.warning(
-                    "Producto %s sin default_code – saltando",
+                    "Producto %s sin elit_product_code – saltando",
                     rec.name,
                 )
                 continue
 
-            params = {"codigo_alfa": rec.default_code, "limit": 1}
+            params = {"codigo_alfa": elit_code, "limit": 1}
 
             try:
                 response = requests.post(
@@ -83,7 +98,7 @@ class ProductTemplate(models.Model):
             except Exception as e:
                 _logger.warning(
                     "Error consultando API ELIT para %s: %s",
-                    rec.default_code,
+                    elit_code,
                     e,
                 )
                 continue
@@ -93,7 +108,7 @@ class ProductTemplate(models.Model):
                 rec.write({"is_elit_product": False})
                 _logger.info(
                     "Producto %s no encontrado en ELIT",
-                    rec.default_code,
+                    elit_code,
                 )
                 continue
 
@@ -144,8 +159,7 @@ class ProductTemplate(models.Model):
         if not products:
             return {"updated": 0, "not_found": 0, "errors": 0, "total_api_calls": 0}
 
-        # Build a map of default_code -> product for fast lookup
-        code_to_product = {p.default_code: p for p in products if p.default_code}
+        code_to_product = {p.elit_product_code: p for p in products if p.elit_product_code}
         all_codes = set(code_to_product.keys())
 
         _logger.info(
@@ -285,7 +299,7 @@ class ProductTemplate(models.Model):
             _logger.info("ELIT price/stock batch: no ELIT products in Odoo.")
             return {"updated": 0, "errors": 0, "api_offset": 0, "page_size": 0, "done": True}
 
-        code_to_product = {p.default_code: p for p in products if p.default_code}
+        code_to_product = {p.elit_product_code: p for p in products if p.elit_product_code}
 
         user_id = int(user_id_str)
         payload = {"user_id": user_id, "token": token}
@@ -418,7 +432,7 @@ class ProductTemplate(models.Model):
         if not partner:
             return
 
-        codigo = product.default_code
+        codigo = product.elit_product_code
         supplierinfo = self.env["product.supplierinfo"].search(
             [
                 ("partner_id", "=", partner.id),

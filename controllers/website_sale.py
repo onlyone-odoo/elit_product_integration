@@ -25,7 +25,7 @@ class WebsiteSaleElit(WebsiteSale):
 
         if template.is_elit_product:
             # Consulta API en vivo para stock real de ELIT
-            stock_elit = self._get_elit_stock_real_time(template.default_code)
+            stock_elit = self._get_elit_stock_real_time(template.elit_product_code)
             if stock_elit <= 0:
                 # Eliminar la línea si no hay stock
                 sale_order = request.website.sale_get_order()

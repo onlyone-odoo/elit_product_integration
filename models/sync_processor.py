@@ -78,12 +78,12 @@ class ElitSyncProcessor(models.AbstractModel):
 
     @api.model
     def _archive_deleted_products(self, seen_codes=None):
-        """Archive ELIT products not in API (default_code not in seen_codes). No API calls."""
+        """Archive ELIT products not in API (elit_product_code not in seen_codes). No API calls."""
         if not seen_codes:
             return
         not_seen = self.env["product.template"].search([
             ("is_elit_product", "=", True),
-            ("default_code", "not in", list(seen_codes)),
+            ("elit_product_code", "not in", list(seen_codes)),
         ])
         if not_seen:
             not_seen.write({"active": False, "stock_elit": 0})
@@ -413,7 +413,7 @@ class ElitSyncProcessor(models.AbstractModel):
         vals = {
             "name": prod.get("nombre") or f"ELIT Product {codigo}",
             "detailed_type": "product",
-            "default_code": codigo,
+            "elit_product_code": codigo,
             "barcode": barcode,
             "categ_id": categ.id
             or self.env.ref(
@@ -585,7 +585,7 @@ class ElitSyncProcessor(models.AbstractModel):
                     })
                     downloaded += 1
             except Exception as e:
-                _logger.debug("ELIT image download failed %s: %s", product.default_code, e)
+                _logger.debug("ELIT image download failed %s: %s", product.elit_product_code or product.default_code, e)
         if downloaded:
             self.env.cr.commit()
         _logger.info("ELIT images batch: %d downloaded", downloaded)
@@ -730,7 +730,7 @@ class ElitSyncProcessor(models.AbstractModel):
         existing_codes = set(
             self.env["product.template"]
             .search([("is_elit_product", "=", True)])
-            .mapped("default_code")
+            .mapped("elit_product_code")
         )
         _logger.info("Found %d existing ELIT products in Odoo", len(existing_codes))
 
