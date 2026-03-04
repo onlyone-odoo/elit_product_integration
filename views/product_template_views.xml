@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Formulario de producto: agregar campos ELIT -->
+    <record id="view_product_template_form_inherit_elit" model="ir.ui.view">
+        <field name="name">product.template.form.inherit.elit</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_form_view"/>
+        <field name="arch" type="xml">
+
+            <!-- Marca ELIT justo debajo del nombre -->
+            <xpath expr="//field[@name='name']" position="after">
+                <field name="elit_brand" string="Marca ELIT"/>
+            </xpath>
+
+            <!-- Checkbox Gamer bonito -->
+            <xpath expr="//field[@name='detailed_type']" position="after">
+                <field name="is_gamer" widget="boolean_button" 
+                       options="{'terminology': {'active': 'Producto Gamer', 'inactive': 'No gamer'}}"/>
+                       <field name="stock_elit" string="Stock en ELIT" readonly="1"/>
+            </xpath>
+
+        </field>
+    </record>
+
+    <!-- Lista/tree de productos -->
+    <record id="view_product_template_tree_inherit_elit" model="ir.ui.view">
+        <field name="name">product.template.tree.inherit.elit</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_tree_view"/>
+        <field name="arch" type="xml">
+            <field name="default_code" position="after">
+                <field name="elit_brand" optional="show"/>
+                <field name="stock_elit" string="Stock ELIT" optional="show"/>
+            </field>
+        </field>
+    </record>
+
+    <!-- Filtros de búsqueda -->
+    <record id="view_product_template_search_inherit_elit" model="ir.ui.view">
+        <field name="name">product.template.search.inherit.elit</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_search_view"/>
+        <field name="arch" type="xml">
+            <field name="categ_id" position="after">
+                <field name="elit_brand" string="Marca ELIT" filter_domain="[('elit_brand','ilike',self)]"/>
+                <filter string="Productos Gamer" name="filter_gamer" domain="[('is_gamer','=',True)]"/>
+            </field>
+            
+        </field>
+    </record>
+</odoo>
