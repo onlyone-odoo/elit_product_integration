@@ -13,6 +13,11 @@ ELIT_PRICE_STOCK_REQUESTED_DATE_KEY = "elit.price_stock_sync_requested_date"
 ELIT_PRICE_STOCK_DEACTIVATE_PENDING_KEY = "elit.price_stock_sync_deactivate_pending"
 CRON_ELIT_PRICE_STOCK_BATCH_XML_ID = "elit_product_integration.cron_elit_price_stock_batch"
 
+ELIT_NEW_PRODUCTS_OFFSET_KEY = "elit.new_products_sync_offset"
+ELIT_NEW_PRODUCTS_REQUESTED_DATE_KEY = "elit.new_products_sync_requested_date"
+ELIT_NEW_PRODUCTS_DEACTIVATE_PENDING_KEY = "elit.new_products_sync_deactivate_pending"
+CRON_ELIT_NEW_PRODUCTS_BATCH_XML_ID = "elit_product_integration.cron_elit_new_products_batch"
+
 
 class ElitSyncProcessor(models.AbstractModel):
     _name = "elit.sync.processor"
@@ -45,11 +50,18 @@ class ElitSyncProcessor(models.AbstractModel):
         seen_codes = set()
 
         while True:
-            updated, batch_seen = self._run_sync_batch(sync_type, offset, limit)
+            result = self._run_sync_batch(sync_type, offset, limit)
+            if result is None:
+                _logger.error(
+                    "API error during %s sync at offset %d, aborting.",
+                    sync_type, offset,
+                )
+                break
+            updated, batch_seen, api_count = result
             total_processed += updated
             seen_codes |= batch_seen
 
-            if updated < limit:
+            if api_count < limit:
                 _logger.info("Last %s batch: %s products – finalizing", sync_type, updated)
                 break
 
@@ -186,9 +198,10 @@ class ElitSyncProcessor(models.AbstractModel):
             data = response.json()
         except Exception as e:
             _logger.error(
-                f"Error in _run_sync_batch ({sync_type}, offset={offset}): {e}"
+                "Error in _run_sync_batch (%s, offset=%s): %s",
+                sync_type, offset, e,
             )
-            return 0
+            return None
 
         cotizacion = float(data.get("cotizacion") or 1.0)
         products = data.get("resultado", [])
@@ -196,7 +209,7 @@ class ElitSyncProcessor(models.AbstractModel):
         _logger.info("Page received: %s products", len(products))
 
         if not products:
-            return 0, set()
+            return 0, set(), 0
 
         first_product_logged = False
         processed = 0
@@ -258,7 +271,7 @@ class ElitSyncProcessor(models.AbstractModel):
             offset,
         )
 
-        return processed, seen_codes
+        return processed, seen_codes, len(products)
 
     def _get_or_create_public_categ(self, name, parent_id=False):
         """Create or return an ecommerce public category."""
@@ -662,7 +675,13 @@ class ElitSyncProcessor(models.AbstractModel):
 
         result = self.env["product.template"]._elit_fetch_and_apply_one_page()
 
-        if result is None or result.get("done"):
+        if result is None:
+            _logger.warning(
+                "ELIT price/stock batch: skipped (credentials missing or API error).",
+            )
+            return
+
+        if result.get("done"):
             ICP.set_param(ELIT_PRICE_STOCK_REQUESTED_DATE_KEY, "")
             ICP.set_param(ELIT_PRICE_STOCK_DEACTIVATE_PENDING_KEY, "1")
             self.env.cr.commit()
@@ -672,26 +691,11 @@ class ElitSyncProcessor(models.AbstractModel):
             )
 
     @api.model
-    def _cron_elit_deactivate_batch_if_pending(self):
-        """Called by cleanup cron every ~10 min.
-
-        When the batch cron finishes, it cannot deactivate itself (Odoo locks
-        the ir.cron row during execution).  Instead it sets a flag; this
-        method reads the flag and performs the deactivation from a separate
-        cron execution.
-        """
-        ICP = self.env["ir.config_parameter"].sudo()
-        pending = (
-            ICP.get_param(ELIT_PRICE_STOCK_DEACTIVATE_PENDING_KEY) or ""
-        ).strip()
-        if pending != "1":
-            return
-
+    def _deactivate_cron_if_found(self, xml_id, code_fallback):
+        """Deactivate a cron by xml_id; fall back to search by code string."""
         cron = None
         try:
-            cron = self.env.ref(
-                CRON_ELIT_PRICE_STOCK_BATCH_XML_ID, raise_if_not_found=False
-            )
+            cron = self.env.ref(xml_id, raise_if_not_found=False)
         except Exception:
             pass
         if not cron:
@@ -700,36 +704,159 @@ class ElitSyncProcessor(models.AbstractModel):
                 .sudo()
                 .search(
                     [
-                        ("code", "=", "model._cron_elit_price_stock_batch()"),
+                        ("code", "=", code_fallback),
                         ("model_id.model", "=", "elit.sync.processor"),
                     ],
                     limit=1,
                 )
             )
-
         if cron:
             cron.sudo().write({"active": False})
             _logger.info(
-                "ELIT price/stock sync: batch cron id=%s deactivated (was pending).",
-                cron.id,
+                "ELIT: batch cron id=%s (%s) deactivated.", cron.id, xml_id,
             )
         else:
             _logger.warning(
-                "ELIT price/stock sync: deactivate pending but cron not found "
-                "(xml_id=%s).",
-                CRON_ELIT_PRICE_STOCK_BATCH_XML_ID,
+                "ELIT: deactivate pending but cron not found (xml_id=%s).", xml_id,
             )
 
-        ICP.set_param(ELIT_PRICE_STOCK_DEACTIVATE_PENDING_KEY, "")
-        self.env.cr.commit()
+    @api.model
+    def _cron_elit_deactivate_batch_if_pending(self):
+        """Called by cleanup cron every ~10 min.
+
+        Checks all pending-deactivation flags and deactivates the
+        corresponding batch crons.  A separate cron is required because
+        Odoo locks the ir.cron row during execution, so a batch cron
+        cannot deactivate itself.
+        """
+        ICP = self.env["ir.config_parameter"].sudo()
+        changed = False
+
+        if (ICP.get_param(ELIT_PRICE_STOCK_DEACTIVATE_PENDING_KEY) or "").strip() == "1":
+            self._deactivate_cron_if_found(
+                CRON_ELIT_PRICE_STOCK_BATCH_XML_ID,
+                "model._cron_elit_price_stock_batch()",
+            )
+            ICP.set_param(ELIT_PRICE_STOCK_DEACTIVATE_PENDING_KEY, "")
+            changed = True
+
+        if (ICP.get_param(ELIT_NEW_PRODUCTS_DEACTIVATE_PENDING_KEY) or "").strip() == "1":
+            self._deactivate_cron_if_found(
+                CRON_ELIT_NEW_PRODUCTS_BATCH_XML_ID,
+                "model._cron_elit_new_products_batch()",
+            )
+            ICP.set_param(ELIT_NEW_PRODUCTS_DEACTIVATE_PENDING_KEY, "")
+            changed = True
+
+        if changed:
+            self.env.cr.commit()
+
+    # ------------------------------------------------------------------
+    # Trigger + batch for NEW products (mirrors price/stock pattern)
+    # ------------------------------------------------------------------
+
+    @api.model
+    def _action_request_elit_new_products_sync(self):
+        """Called by trigger cron (e.g. every 24h).
+
+        Sets sync-requested date to today, resets offset to 1, and activates
+        the batch cron so it imports new ELIT products page by page.
+        """
+        ICP = self.env["ir.config_parameter"].sudo()
+        today_str = fields.Date.today().isoformat()
+        ICP.set_param(ELIT_NEW_PRODUCTS_REQUESTED_DATE_KEY, today_str)
+        ICP.set_param(ELIT_NEW_PRODUCTS_OFFSET_KEY, "1")
+        try:
+            self.env.ref(CRON_ELIT_NEW_PRODUCTS_BATCH_XML_ID).sudo().write(
+                {"active": True}
+            )
+            _logger.info(
+                "ELIT new products sync: trigger set requested_date=%s, "
+                "batch cron activated.",
+                today_str,
+            )
+        except Exception as e:
+            _logger.warning(
+                "ELIT new products sync: could not activate batch cron: %s", e,
+            )
+
+    @api.model
+    def _cron_elit_new_products_batch(self):
+        """Called by ir.cron every few minutes while new-products sync is active.
+
+        Processes ONE API page (~100 products) per execution.  Only creates
+        products whose ``elit_product_code`` does not yet exist in Odoo.
+        When all pages are done, signals the cleanup cron to deactivate this
+        batch cron.
+        """
+        ICP = self.env["ir.config_parameter"].sudo()
+        requested = (
+            ICP.get_param(ELIT_NEW_PRODUCTS_REQUESTED_DATE_KEY) or ""
+        ).strip()
+        if requested != fields.Date.today().isoformat():
+            return
+
+        offset = int(ICP.get_param(ELIT_NEW_PRODUCTS_OFFSET_KEY, "1") or "1")
+        limit = 100
+
+        existing_codes = set(
+            self.env["product.template"]
+            .search([
+                ("is_elit_product", "=", True),
+                ("elit_product_code", "!=", False),
+            ])
+            .mapped("elit_product_code")
+        )
+
+        result = self._run_sync_batch(
+            "full", offset, limit,
+            skip_existing=True, existing_codes=existing_codes,
+        )
+
+        if result is None:
+            _logger.warning(
+                "ELIT new products batch: API error at offset %d, will retry.",
+                offset,
+            )
+            return
+
+        processed, _seen_codes, api_count = result
+
+        if api_count < limit:
+            ICP.set_param(ELIT_NEW_PRODUCTS_OFFSET_KEY, "1")
+            ICP.set_param(ELIT_NEW_PRODUCTS_REQUESTED_DATE_KEY, "")
+            ICP.set_param(ELIT_NEW_PRODUCTS_DEACTIVATE_PENDING_KEY, "1")
+            self.env.cr.commit()
+            _logger.info(
+                "ELIT new products sync: complete (%d created this page). "
+                "Deactivation requested.",
+                processed,
+            )
+        else:
+            new_offset = offset + limit
+            ICP.set_param(ELIT_NEW_PRODUCTS_OFFSET_KEY, str(new_offset))
+            self.env.cr.commit()
+            _logger.info(
+                "ELIT new products batch: offset %d → %d (%d created).",
+                offset, new_offset, processed,
+            )
 
     @api.model
     def sync_new_products_only(self):
-        """Synchronize only NEW products from ELIT API (reuses _run_sync_batch with skip_existing)."""
-        _logger.info("Starting sync of NEW products only from ELIT")
+        """Synchronize only NEW products from ELIT API in one run.
+
+        WARNING: This method loops over ALL API pages in a single execution.
+        Use only for manual server actions or wizard calls, NEVER from a cron.
+        The scheduled sync uses the trigger + batch pattern instead
+        (_action_request_elit_new_products_sync).
+        """
+        _logger.info("Starting sync of NEW products only from ELIT (manual)")
         existing_codes = set(
             self.env["product.template"]
-            .search([("is_elit_product", "=", True)])
+            .search([
+                ("is_elit_product", "=", True),
+                ("elit_product_code", "!=", False),
+            ])
             .mapped("elit_product_code")
         )
         _logger.info("Found %d existing ELIT products in Odoo", len(existing_codes))
@@ -739,16 +866,23 @@ class ElitSyncProcessor(models.AbstractModel):
         total_new = 0
 
         while True:
-            updated, batch_seen = self._run_sync_batch(
+            result = self._run_sync_batch(
                 "full",
                 offset,
                 limit,
                 skip_existing=True,
                 existing_codes=existing_codes,
             )
+            if result is None:
+                _logger.error(
+                    "API error during new products sync at offset %d, aborting.",
+                    offset,
+                )
+                break
+            updated, batch_seen, api_count = result
             total_new += updated
             existing_codes |= batch_seen
-            if updated < limit:
+            if api_count < limit:
                 break
             offset += limit
 

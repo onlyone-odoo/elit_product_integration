@@ -294,13 +294,6 @@ class ProductTemplate(models.Model):
             _logger.warning("ELIT price/stock batch: missing credentials.")
             return None
 
-        products = self.search([("is_elit_product", "=", True)])
-        if not products:
-            _logger.info("ELIT price/stock batch: no ELIT products in Odoo.")
-            return {"updated": 0, "errors": 0, "api_offset": 0, "page_size": 0, "done": True}
-
-        code_to_product = {p.elit_product_code: p for p in products if p.elit_product_code}
-
         user_id = int(user_id_str)
         payload = {"user_id": user_id, "token": token}
         headers = {"Content-Type": "application/json"}
@@ -335,6 +328,22 @@ class ProductTemplate(models.Model):
             return {"updated": 0, "errors": 0, "api_offset": api_offset, "page_size": 0, "done": True}
 
         _logger.info("ELIT price/stock batch: offset=%d, received=%d products.", api_offset, page_size)
+
+        api_codes = [
+            prod.get("codigo_alfa") or prod.get("codigo_producto")
+            for prod in api_products
+        ]
+        api_codes = [c for c in api_codes if c]
+        if api_codes:
+            products = self.search([
+                ("is_elit_product", "=", True),
+                ("elit_product_code", "in", api_codes),
+            ])
+            code_to_product = {
+                p.elit_product_code: p for p in products if p.elit_product_code
+            }
+        else:
+            code_to_product = {}
 
         updated = 0
         errors = 0
