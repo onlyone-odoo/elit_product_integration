@@ -1,6 +1,7 @@
+import base64
 import requests
 import logging
-from odoo import fields, models, api
+from odoo import _, fields, models, api
 from odoo.exceptions import UserError
 
 _logger = logging.getLogger(__name__)
@@ -426,13 +427,22 @@ class ProductTemplate(models.Model):
         ars = self.env["res.currency"].search([("name", "=", "ARS")], limit=1)
         currency_id = usd.id if moneda == 2 else (ars.id if ars else self.env.company.currency_id.id)
 
-        # Update product: only stock_elit and sync metadata (no replenishment_base_cost)
-        product.write({
+        image_url_elit = None
+        imagenes = elit_data.get("imagenes")
+        if imagenes and isinstance(imagenes, list) and imagenes[0]:
+            first = imagenes[0]
+            if isinstance(first, str):
+                image_url_elit = first
+
+        write_vals = {
             "stock_elit": stock,
             "is_elit_product": True,
             "elit_last_sync": fields.Datetime.now(),
             "replenishment_cost_type": "supplier_price",
-        })
+        }
+        if image_url_elit:
+            write_vals["elit_image_url"] = image_url_elit
+        product.write(write_vals)
 
         # Update supplier price in product.supplierinfo for ELIT partner.
         # This allows Odoo / product_replenishment_cost to use main supplier
@@ -474,3 +484,98 @@ class ProductTemplate(models.Model):
                 "currency_id": currency_id,
                 "delay": 3,
             })
+
+    def _elit_download_image(self, force=False):
+        """Download image from elit_image_url into image_1920.
+
+        Skips products that already have an image unless *force* is True.
+        """
+        for product in self:
+            url = (product.elit_image_url or "").strip()
+            if not url:
+                continue
+            if product.image_1920 and not force:
+                continue
+            try:
+                resp = requests.get(url, timeout=10)
+                if resp.status_code == 200 and resp.content:
+                    product.write({
+                        "image_1920": base64.b64encode(resp.content),
+                    })
+            except Exception as e:
+                _logger.debug(
+                    "ELIT image download failed %s: %s",
+                    product.elit_product_code or product.default_code,
+                    e,
+                )
+
+    def elit_refresh_from_api(self):
+        """Re-fetch a single ELIT product from the API and update all data.
+
+        Intended as a manual "fix this product" action: queries the API by
+        ``codigo_alfa`` for one product, applies stock/price/image data via
+        :meth:`_apply_elit_data_to_product`, and immediately downloads the
+        image if available.
+
+        Raises :class:`~odoo.exceptions.UserError` when called on more than
+        one record or when credentials are missing.
+        """
+        self.ensure_one()
+
+        elit_code = self.elit_product_code
+        if not elit_code:
+            partner = self._get_elit_partner()
+            if partner:
+                si = self.env["product.supplierinfo"].search([
+                    ("partner_id", "=", partner.id),
+                    ("product_tmpl_id", "=", self.id),
+                ], limit=1)
+                elit_code = si.product_code if si else None
+        if not elit_code:
+            raise UserError(
+                _("El producto no tiene código ELIT ni supplierinfo asociada.")
+            )
+
+        get_param = self.env["ir.config_parameter"].sudo().get_param
+        user_id_str = get_param("elit.user_id")
+        token = get_param("elit.token")
+        api_url = get_param(
+            "elit.api_url", "https://clientes.elit.com.ar"
+        ).rstrip("/")
+        endpoint = get_param("elit.endpoint", "/v1/api/productos")
+
+        if not user_id_str or not token:
+            raise UserError(
+                _("Faltan credenciales ELIT en la configuración del sistema.")
+            )
+
+        payload = {"user_id": int(user_id_str), "token": token}
+        headers = {"Content-Type": "application/json"}
+        params = {"codigo_alfa": elit_code, "limit": 1}
+
+        try:
+            response = requests.post(
+                f"{api_url}{endpoint}",
+                params=params,
+                json=payload,
+                headers=headers,
+                timeout=10,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except Exception as e:
+            raise UserError(
+                _("Error consultando API ELIT para %s: %s") % (elit_code, e)
+            )
+
+        productos = data.get("resultado", [])
+        if not productos:
+            raise UserError(
+                _("El producto %s no fue encontrado en la API de ELIT.")
+                % elit_code
+            )
+
+        cotizacion = float(data.get("cotizacion") or 1.0)
+        self._apply_elit_data_to_product(self, productos[0], cotizacion)
+        self._update_cost_from_replenishment_cost()
+        self._elit_download_image(force=True)

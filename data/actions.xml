@@ -49,4 +49,14 @@ env['elit.sync.processor'].update_all_elit_stock_and_cost()
 env['elit.sync.processor'].sync_new_products_only()
         </field>
     </record>
+
+    <!-- Acción "fix this product": re-consulta la API por 1 producto y descarga imagen -->
+    <record id="action_elit_refresh_product" model="ir.actions.server">
+        <field name="name">ELIT: Reparar datos e imagen (1 producto)</field>
+        <field name="type">ir.actions.server</field>
+        <field name="model_id" ref="product.model_product_template"/>
+        <field name="binding_model_id" ref="product.model_product_template"/>
+        <field name="state">code</field>
+        <field name="code">records.elit_refresh_from_api()</field>
+    </record>
 </odoo>
