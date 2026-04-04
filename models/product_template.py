@@ -517,8 +517,11 @@ class ProductTemplate(models.Model):
         :meth:`_apply_elit_data_to_product`, and immediately downloads the
         image if available.
 
-        Raises :class:`~odoo.exceptions.UserError` when called on more than
-        one record or when credentials are missing.
+        Raises :class:`~odoo.exceptions.UserError` if credentials are missing
+        or the product cannot be resolved in ELIT.
+
+        Must be called on exactly one record (use :meth:`action_elit_sync_from_api`
+        for multi-select batch stock sync).
         """
         self.ensure_one()
 
@@ -579,3 +582,23 @@ class ProductTemplate(models.Model):
         self._apply_elit_data_to_product(self, productos[0], cotizacion)
         self._update_cost_from_replenishment_cost()
         self._elit_download_image(force=True)
+
+    def action_elit_sync_from_api(self):
+        """Entry point for the consolidated product action menu.
+
+        - **One** selected template: full refresh (stock, supplier price,
+          image URL + binary) via :meth:`elit_refresh_from_api` — one API call.
+        - **Several** templates: efficient paginated stock/cost sync via
+          :meth:`update_stock_batch` (batched API pattern; no per-row loop).
+
+        :return: Nothing for a single record; for several, the stats dict from
+            :meth:`update_stock_batch` when applicable.
+        """
+        if not self:
+            return
+        if len(self) == 1:
+            return self.elit_refresh_from_api()
+        return self.env["product.template"].update_stock_batch(
+            domain=[("id", "in", self.ids)],
+            commit_interval=50,
+        )

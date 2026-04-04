@@ -8,18 +8,7 @@ _logger = logging.getLogger(__name__)
 
 
 def post_init_hook(env):
-    """Post-init hook: fix legacy crons and migrate elit_product_code."""
-    cron_incremental = env.ref(
-        "elit_product_integration.cron_elit_incremental",
-        raise_if_not_found=False,
-    )
-    if cron_incremental and cron_incremental.active:
-        cron_incremental.write({
-            "active": False,
-            "name": "ELIT: Sincronización Incremental (LEGACY - Desactivado)",
-        })
-        _logger.info("Deactivated legacy cron_elit_incremental")
-
+    """Post-init hook: migrate elit_product_code from supplierinfo."""
     env.cr.execute("""
         UPDATE product_template pt
         SET elit_product_code = COALESCE(

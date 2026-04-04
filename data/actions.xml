@@ -1,62 +1,47 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo noupdate="0">
-    <!-- Acción para pocos productos (1 llamada API por producto) -->
-    <record id="action_update_single_stock_elit" model="ir.actions.server">
-        <field name="name">ELIT: Actualizar Stock (individual)</field>
+    <!-- Remove superseded actions (merged into action_elit_sync_from_api) -->
+    <delete model="ir.actions.server" id="action_update_single_stock_elit"/>
+    <delete model="ir.actions.server" id="action_update_stock_batch"/>
+    <delete model="ir.actions.server" id="action_elit_refresh_product"/>
+
+    <!--
+        Single Acciones menu entry on product.template:
+        - 1 record  → elit_refresh_from_api (stock, price, image from API)
+        - N records → update_stock_batch (batched API pages, efficient)
+
+        Import-all and full-catalog sync stay without binding (assign to menu
+        or automation if needed) to avoid cluttering the product form.
+    -->
+    <record id="action_elit_sync_from_api" model="ir.actions.server">
+        <field name="name">ELIT: Sincronizar desde API</field>
         <field name="type">ir.actions.server</field>
         <field name="model_id" ref="product.model_product_template"/>
         <field name="binding_model_id" ref="product.model_product_template"/>
         <field name="state">code</field>
-        <field name="code">records.update_single_stock_elit()</field>
+        <field name="code">records.action_elit_sync_from_api()</field>
     </record>
 
-    <!-- Acción batch para muchos productos (muy eficiente) -->
-    <record id="action_update_stock_batch" model="ir.actions.server">
-        <field name="name">ELIT: Actualizar Stock BATCH (eficiente)</field>
-        <field name="type">ir.actions.server</field>
-        <field name="model_id" ref="product.model_product_template"/>
-        <field name="binding_model_id" ref="product.model_product_template"/>
-        <field name="state">code</field>
-        <field name="code">
-if records:
-    env['product.template'].update_stock_batch(
-        domain=[('id', 'in', records.ids)],
-        commit_interval=50,
-    )
-        </field>
-    </record>
-
-    <!-- Acción para actualizar TODOS los productos ELIT -->
+    <!-- No binding: use from Ajustes > Acciones programadas / menú técnico o automatizaciones -->
     <record id="action_update_all_elit_stock" model="ir.actions.server">
-        <field name="name">ELIT: Actualizar TODOS los Stock (batch)</field>
+        <field name="name">ELIT: Actualizar todo el catálogo (stock/costo, full loop)</field>
         <field name="type">ir.actions.server</field>
         <field name="model_id" ref="product.model_product_template"/>
-        <field name="binding_model_id" ref="product.model_product_template"/>
+        <field name="binding_model_id" eval="False"/>
         <field name="state">code</field>
         <field name="code">
 env['elit.sync.processor'].update_all_elit_stock_and_cost()
         </field>
     </record>
 
-    <!-- Acción para importar solo productos nuevos -->
     <record id="action_sync_new_products" model="ir.actions.server">
-        <field name="name">ELIT: Importar Productos Nuevos</field>
+        <field name="name">ELIT: Importar productos nuevos (full loop manual)</field>
         <field name="type">ir.actions.server</field>
         <field name="model_id" ref="product.model_product_template"/>
-        <field name="binding_model_id" ref="product.model_product_template"/>
+        <field name="binding_model_id" eval="False"/>
         <field name="state">code</field>
         <field name="code">
 env['elit.sync.processor'].sync_new_products_only()
         </field>
-    </record>
-
-    <!-- Acción "fix this product": re-consulta la API por 1 producto y descarga imagen -->
-    <record id="action_elit_refresh_product" model="ir.actions.server">
-        <field name="name">ELIT: Reparar datos e imagen (1 producto)</field>
-        <field name="type">ir.actions.server</field>
-        <field name="model_id" ref="product.model_product_template"/>
-        <field name="binding_model_id" ref="product.model_product_template"/>
-        <field name="state">code</field>
-        <field name="code">records.elit_refresh_from_api()</field>
     </record>
 </odoo>
