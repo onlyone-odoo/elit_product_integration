@@ -439,6 +439,7 @@ class ProductTemplate(models.Model):
             "is_elit_product": True,
             "elit_last_sync": fields.Datetime.now(),
             "replenishment_cost_type": "supplier_price",
+            "allow_out_of_stock_order": True,
         }
         if image_url_elit:
             write_vals["elit_image_url"] = image_url_elit

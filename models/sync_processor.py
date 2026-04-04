@@ -447,6 +447,7 @@ class ElitSyncProcessor(models.AbstractModel):
             "taxes_id": taxes_ids,
             "supplier_taxes_id": supplier_taxes_ids,
             "elit_image_url": image_url_elit,
+            "allow_out_of_stock_order": True,
             "zippin_product_length": largo,
             "zippin_product_width": ancho,
             "zippin_product_height": alto,

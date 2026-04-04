@@ -1,6 +1,6 @@
 {
     "name": "ELIT Product Integration",
-    "version": "17.0.6.0.0",
+    "version": "17.0.7.0.0",
     "category": "Inventory/Purchase",
     "summary": "Importación y sincronización de productos desde API ELIT",
     "description": """
@@ -15,6 +15,7 @@
         "purchase_stock",
         "sale_stock",
         "website_sale",
+        "website_sale_stock",
         "product_replenishment_cost",
         "zippin",
     ],

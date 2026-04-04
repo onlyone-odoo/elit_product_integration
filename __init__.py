@@ -28,3 +28,15 @@ def post_init_hook(env):
     migrated = env.cr.rowcount
     if migrated:
         _logger.info("Migrated elit_product_code for %d products", migrated)
+
+    env.cr.execute("""
+        UPDATE product_template
+        SET allow_out_of_stock_order = TRUE
+        WHERE is_elit_product = TRUE
+          AND (allow_out_of_stock_order IS NOT TRUE)
+    """)
+    oos = env.cr.rowcount
+    if oos:
+        _logger.info(
+            "Set allow_out_of_stock_order for %d ELIT product templates", oos
+        )
