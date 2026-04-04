@@ -2,17 +2,34 @@
 <odoo noupdate="0">
     <!-- Note: noupdate="0" para que los crons se actualicen al upgrade del módulo.
          El post_init_hook asegura que los cambios se apliquen correctamente. -->
-    <!-- Cron: Importar productos nuevos (no toca existentes) -->
+    <!-- Trigger: cada 24h solicita importación de nuevos productos y activa el batch. -->
     <record id="cron_elit_new_products" model="ir.cron">
-        <field name="name">ELIT: Importar Productos Nuevos</field>
+        <field name="name">ELIT: Activar importación de productos nuevos</field>
         <field name="interval_number">1</field>
         <field name="interval_type">days</field>
         <field name="model_id" ref="model_elit_sync_processor"/>
         <field name="state">code</field>
-        <field name="code">model.sync_new_products_only()</field>
+        <field name="code">model._action_request_elit_new_products_sync()</field>
+        <field name="numbercall">-1</field>
         <field name="user_id" ref="base.user_root"/>
         <field name="active" eval="True"/>
         <field name="priority">5</field>
+    </record>
+
+    <!-- Batch: corre cada 5 min SOLO cuando el trigger lo activa. Procesa 1 página API
+         (~100 productos) por ejecución. Solo crea productos nuevos (no existentes en Odoo).
+         Se desactiva automáticamente al terminar el ciclo vía cleanup cron. -->
+    <record id="cron_elit_new_products_batch" model="ir.cron">
+        <field name="name">ELIT: Lotes de importación productos nuevos</field>
+        <field name="model_id" ref="model_elit_sync_processor"/>
+        <field name="state">code</field>
+        <field name="code">model._cron_elit_new_products_batch()</field>
+        <field name="interval_number">5</field>
+        <field name="interval_type">minutes</field>
+        <field name="numbercall">-1</field>
+        <field name="user_id" ref="base.user_root"/>
+        <field name="active" eval="False"/>
+        <field name="priority">7</field>
     </record>
 
     <!-- LEGACY: Full-loop stock update (desactivado, reemplazado por trigger+batch).
