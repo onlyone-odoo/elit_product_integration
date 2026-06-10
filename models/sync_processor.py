@@ -3,7 +3,9 @@ import requests
 import base64
 import logging
 import json
-from odoo import models, api, fields
+from datetime import timedelta
+
+from odoo import _, models, api, fields
 from odoo.exceptions import UserError, ValidationError
 
 _logger = logging.getLogger(__name__)
@@ -17,6 +19,19 @@ ELIT_NEW_PRODUCTS_OFFSET_KEY = "elit.new_products_sync_offset"
 ELIT_NEW_PRODUCTS_REQUESTED_DATE_KEY = "elit.new_products_sync_requested_date"
 ELIT_NEW_PRODUCTS_DEACTIVATE_PENDING_KEY = "elit.new_products_sync_deactivate_pending"
 CRON_ELIT_NEW_PRODUCTS_BATCH_XML_ID = "elit_product_integration.cron_elit_new_products_batch"
+
+# Sync watchdog: last completed cycle timestamps + staleness thresholds (hours).
+# Thresholds can be overridden via ICP keys *_stale_hours.
+ELIT_NEW_PRODUCTS_LAST_DONE_KEY = "elit.new_products_last_done"
+ELIT_PRICE_STOCK_LAST_DONE_KEY = "elit.price_stock_last_done"
+ELIT_NEW_PRODUCTS_STALE_HOURS_KEY = "elit.new_products_stale_hours"
+ELIT_PRICE_STOCK_STALE_HOURS_KEY = "elit.price_stock_stale_hours"
+ELIT_NEW_PRODUCTS_STALE_HOURS_DEFAULT = 30  # daily trigger + margin
+ELIT_PRICE_STOCK_STALE_HOURS_DEFAULT = 14  # 6h trigger + margin
+ELIT_STALE_NOTIFIED_KEY = "elit.sync_stale_notified"
+
+# Safety: reset a sync cycle stuck in progress for more than this many hours.
+ELIT_SYNC_MAX_CYCLE_HOURS = 48
 
 
 class ElitSyncProcessor(models.AbstractModel):
@@ -242,7 +257,9 @@ class ElitSyncProcessor(models.AbstractModel):
                 seen_codes.add(codigo)
                 if processed % commit_interval == 0:
                     if products_to_update_cost:
-                        products_to_update_cost._update_cost_from_replenishment_cost()
+                        self.env["product.template"]._elit_update_cost_all_companies(
+                            products_to_update_cost
+                        )
                         products_to_update_cost = self.env["product.template"]
                     self.env.cr.commit()
                     _logger.debug("Committed %s products so far (offset %s)", processed, offset)
@@ -259,7 +276,9 @@ class ElitSyncProcessor(models.AbstractModel):
                 continue
 
         if products_to_update_cost:
-            products_to_update_cost._update_cost_from_replenishment_cost()
+            self.env["product.template"]._elit_update_cost_all_companies(
+                products_to_update_cost
+            )
         if processed > 0 and processed % commit_interval != 0:
             self.env.cr.commit()
 
@@ -272,6 +291,34 @@ class ElitSyncProcessor(models.AbstractModel):
         )
 
         return processed, seen_codes, len(products)
+
+    @api.model
+    def _elit_tax_ids_for_rate(self, iva_rate, type_tax_use):
+        """Return account.tax ids for the rate, one per target company.
+
+        Multi-company: searches taxes in the configured company (Settings) or in
+        all companies when none is configured, and returns one match per company.
+        """
+        amount = round(float(iva_rate), 2)
+        company_ids = self.env["product.template"]._elit_get_target_companies().ids
+        # sudo() on account.tax: search across companies in cron context;
+        # safe as it only reads standard tax records by amount/type.
+        taxes = self.env["account.tax"].sudo().search(
+            [
+                ("type_tax_use", "=", type_tax_use),
+                ("amount_type", "=", "percent"),
+                ("amount", "=", amount),
+                ("company_id", "in", company_ids),
+            ]
+        )
+        tax_ids = []
+        seen_companies = set()
+        for tax in taxes:
+            if tax.company_id.id in seen_companies:
+                continue
+            seen_companies.add(tax.company_id.id)
+            tax_ids.append(tax.id)
+        return tax_ids
 
     def _get_or_create_public_categ(self, name, parent_id=False):
         """Create or return an ecommerce public category."""
@@ -386,29 +433,16 @@ class ElitSyncProcessor(models.AbstractModel):
         warranty_text = (prod.get("garantia") or "").strip() or "Sin garantía"
         description = prod.get("descripcion") or False
 
-        # Taxes (cached)
+        # Taxes (cached): one tax per target company (multi-company support;
+        # the m2m holds taxes of several companies, each company sees its own)
         iva_rate = float(prod.get("iva") or 21.0)
         if iva_rate not in ctx["tax_cache"]:
-            sale_tax = self.env["account.tax"].search(
-                [
-                    ("type_tax_use", "=", "sale"),
-                    ("amount_type", "=", "percent"),
-                    ("amount", "=", iva_rate),
-                ],
-                limit=1,
-            )
-            purchase_tax = self.env["account.tax"].search(
-                [
-                    ("type_tax_use", "=", "purchase"),
-                    ("amount_type", "=", "percent"),
-                    ("amount", "=", iva_rate),
-                ],
-                limit=1,
-            )
-            ctx["tax_cache"][iva_rate] = (sale_tax, purchase_tax)
-        sale_tax, purchase_tax = ctx["tax_cache"][iva_rate]
-        taxes_ids = [(6, 0, sale_tax.ids)] if sale_tax else []
-        supplier_taxes_ids = [(6, 0, purchase_tax.ids)] if purchase_tax else []
+            sale_tax_ids = self._elit_tax_ids_for_rate(iva_rate, "sale")
+            purchase_tax_ids = self._elit_tax_ids_for_rate(iva_rate, "purchase")
+            ctx["tax_cache"][iva_rate] = (sale_tax_ids, purchase_tax_ids)
+        sale_tax_ids, purchase_tax_ids = ctx["tax_cache"][iva_rate]
+        taxes_ids = [(6, 0, sale_tax_ids)] if sale_tax_ids else []
+        supplier_taxes_ids = [(6, 0, purchase_tax_ids)] if purchase_tax_ids else []
 
         # Internal tax (already handled above with adjustment to precio_costo)
         if impuesto_interno > 0:
@@ -486,6 +520,8 @@ class ElitSyncProcessor(models.AbstractModel):
                 limit=1,
             )
 
+        # company_id explicit (configured or False=shared) for multi-company visibility
+        elit_company_id = self.env["product.template"]._elit_get_company_id()
         result_tmpl = None
         try:
             if supplierinfo:
@@ -496,6 +532,7 @@ class ElitSyncProcessor(models.AbstractModel):
                         "currency_id": usd.id
                         if moneda == 2
                         else (ars.id or self.env.company.currency_id.id),
+                        "company_id": elit_company_id,
                     }
                 )
                 result_tmpl = supplierinfo.product_tmpl_id
@@ -512,6 +549,7 @@ class ElitSyncProcessor(models.AbstractModel):
                         if moneda == 2
                         else (ars.id or self.env.company.currency_id.id),
                         "delay": 3,
+                        "company_id": elit_company_id,
                     }
                 )
                 result_tmpl = tmpl
@@ -541,6 +579,7 @@ class ElitSyncProcessor(models.AbstractModel):
                             {
                                 "price": precio_costo_with_tax,  # Adjusted
                                 "product_code": codigo,
+                                "company_id": elit_company_id,
                             }
                         )
                     else:
@@ -555,6 +594,7 @@ class ElitSyncProcessor(models.AbstractModel):
                                 if moneda == 2
                                 else (ars.id or self.env.company.currency_id.id),
                                 "delay": 3,
+                                "company_id": elit_company_id,
                             }
                         )
                     result_tmpl = existing_product.product_tmpl_id
@@ -637,24 +677,60 @@ class ElitSyncProcessor(models.AbstractModel):
     # ------------------------------------------------------------------
 
     @api.model
+    def _elit_sync_cycle_active(self, ICP, requested_key, offset_key, default_offset="1"):
+        """Return True while a sync cycle is in progress.
+
+        The trigger cron stores the cycle start datetime in ``requested_key``;
+        the batch cron keeps running while it is set, even across midnight
+        (the old ``requested == today`` check silently froze cycles at 00:00).
+        Safety net: cycles in progress for more than ELIT_SYNC_MAX_CYCLE_HOURS
+        are reset (flag + offset) to avoid zombie cycles.
+        """
+        requested = (ICP.get_param(requested_key) or "").strip()
+        if not requested:
+            return False
+        try:
+            # Handles both datetime strings and legacy date-only values
+            start_dt = fields.Datetime.from_string(requested)
+        except ValueError:
+            _logger.warning(
+                "ELIT sync: invalid cycle start %r in %s, resetting flag.",
+                requested,
+                requested_key,
+            )
+            ICP.set_param(requested_key, "")
+            return False
+        if fields.Datetime.now() - start_dt > timedelta(hours=ELIT_SYNC_MAX_CYCLE_HOURS):
+            _logger.warning(
+                "ELIT sync: cycle started %s exceeds %dh, resetting flag and offset (%s).",
+                requested,
+                ELIT_SYNC_MAX_CYCLE_HOURS,
+                requested_key,
+            )
+            ICP.set_param(requested_key, "")
+            ICP.set_param(offset_key, default_offset)
+            return False
+        return True
+
+    @api.model
     def _action_request_elit_price_stock_sync(self):
         """Called by trigger cron (e.g. every 6h).
 
-        Sets sync-requested date to today, resets offset to 1, and activates
+        Stores the cycle start datetime, resets offset to 1, and activates
         the batch cron so it runs every few minutes until the full ELIT
         catalog is processed.
         """
         ICP = self.env["ir.config_parameter"].sudo()
-        today_str = fields.Date.today().isoformat()
-        ICP.set_param(ELIT_PRICE_STOCK_REQUESTED_DATE_KEY, today_str)
+        now_str = fields.Datetime.to_string(fields.Datetime.now())
+        ICP.set_param(ELIT_PRICE_STOCK_REQUESTED_DATE_KEY, now_str)
         ICP.set_param(ELIT_PRICE_STOCK_OFFSET_KEY, "1")
         try:
             self.env.ref(CRON_ELIT_PRICE_STOCK_BATCH_XML_ID).sudo().write(
                 {"active": True}
             )
             _logger.info(
-                "ELIT price/stock sync: trigger set requested_date=%s, batch cron activated.",
-                today_str,
+                "ELIT price/stock sync: trigger set cycle start=%s, batch cron activated.",
+                now_str,
             )
         except Exception as e:
             _logger.warning(
@@ -663,18 +739,17 @@ class ElitSyncProcessor(models.AbstractModel):
 
     @api.model
     def _cron_elit_price_stock_batch(self):
-        """Called by ir.cron every few minutes while price/stock sync is active.
+        """Called by ir.cron every few minutes while price/stock sync is active
+        (in-progress flag set by the trigger; survives midnight).
 
         Processes ONE API page (~100 products) per execution.  When all pages
-        are done, clears the requested-date flag and sets deactivate-pending
+        are done, clears the in-progress flag and sets deactivate-pending
         so the cleanup cron can deactivate this batch cron (avoids row-lock).
         """
         ICP = self.env["ir.config_parameter"].sudo()
-        requested = (
-            ICP.get_param(ELIT_PRICE_STOCK_REQUESTED_DATE_KEY) or ""
-        ).strip()
-        today_str = fields.Date.today().isoformat()
-        if requested != today_str:
+        if not self._elit_sync_cycle_active(
+            ICP, ELIT_PRICE_STOCK_REQUESTED_DATE_KEY, ELIT_PRICE_STOCK_OFFSET_KEY
+        ):
             return
 
         result = self.env["product.template"]._elit_fetch_and_apply_one_page()
@@ -688,6 +763,11 @@ class ElitSyncProcessor(models.AbstractModel):
         if result.get("done"):
             ICP.set_param(ELIT_PRICE_STOCK_REQUESTED_DATE_KEY, "")
             ICP.set_param(ELIT_PRICE_STOCK_DEACTIVATE_PENDING_KEY, "1")
+            # Watchdog: record cycle completion timestamp
+            ICP.set_param(
+                ELIT_PRICE_STOCK_LAST_DONE_KEY,
+                fields.Datetime.to_string(fields.Datetime.now()),
+            )
             self.env.cr.commit()
             _logger.info(
                 "ELIT price/stock sync: complete. "
@@ -763,21 +843,21 @@ class ElitSyncProcessor(models.AbstractModel):
     def _action_request_elit_new_products_sync(self):
         """Called by trigger cron (e.g. every 24h).
 
-        Sets sync-requested date to today, resets offset to 1, and activates
+        Stores the cycle start datetime, resets offset to 1, and activates
         the batch cron so it imports new ELIT products page by page.
         """
         ICP = self.env["ir.config_parameter"].sudo()
-        today_str = fields.Date.today().isoformat()
-        ICP.set_param(ELIT_NEW_PRODUCTS_REQUESTED_DATE_KEY, today_str)
+        now_str = fields.Datetime.to_string(fields.Datetime.now())
+        ICP.set_param(ELIT_NEW_PRODUCTS_REQUESTED_DATE_KEY, now_str)
         ICP.set_param(ELIT_NEW_PRODUCTS_OFFSET_KEY, "1")
         try:
             self.env.ref(CRON_ELIT_NEW_PRODUCTS_BATCH_XML_ID).sudo().write(
                 {"active": True}
             )
             _logger.info(
-                "ELIT new products sync: trigger set requested_date=%s, "
+                "ELIT new products sync: trigger set cycle start=%s, "
                 "batch cron activated.",
-                today_str,
+                now_str,
             )
         except Exception as e:
             _logger.warning(
@@ -786,7 +866,8 @@ class ElitSyncProcessor(models.AbstractModel):
 
     @api.model
     def _cron_elit_new_products_batch(self):
-        """Called by ir.cron every few minutes while new-products sync is active.
+        """Called by ir.cron every few minutes while new-products sync is active
+        (in-progress flag set by the trigger; survives midnight).
 
         Processes ONE API page (~100 products) per execution.  Only creates
         products whose ``elit_product_code`` does not yet exist in Odoo.
@@ -794,10 +875,9 @@ class ElitSyncProcessor(models.AbstractModel):
         batch cron.
         """
         ICP = self.env["ir.config_parameter"].sudo()
-        requested = (
-            ICP.get_param(ELIT_NEW_PRODUCTS_REQUESTED_DATE_KEY) or ""
-        ).strip()
-        if requested != fields.Date.today().isoformat():
+        if not self._elit_sync_cycle_active(
+            ICP, ELIT_NEW_PRODUCTS_REQUESTED_DATE_KEY, ELIT_NEW_PRODUCTS_OFFSET_KEY
+        ):
             return
 
         offset = int(ICP.get_param(ELIT_NEW_PRODUCTS_OFFSET_KEY, "1") or "1")
@@ -830,6 +910,11 @@ class ElitSyncProcessor(models.AbstractModel):
             ICP.set_param(ELIT_NEW_PRODUCTS_OFFSET_KEY, "1")
             ICP.set_param(ELIT_NEW_PRODUCTS_REQUESTED_DATE_KEY, "")
             ICP.set_param(ELIT_NEW_PRODUCTS_DEACTIVATE_PENDING_KEY, "1")
+            # Watchdog: record cycle completion timestamp
+            ICP.set_param(
+                ELIT_NEW_PRODUCTS_LAST_DONE_KEY,
+                fields.Datetime.to_string(fields.Datetime.now()),
+            )
             self.env.cr.commit()
             _logger.info(
                 "ELIT new products sync: complete (%d created this page). "
@@ -897,17 +982,105 @@ class ElitSyncProcessor(models.AbstractModel):
         return {"new": total_new, "skipped": len(existing_codes) - total_new}
 
     # ------------------------------------------------------------------
-    # API health check
+    # API health check + sync watchdog
     # ------------------------------------------------------------------
+
+    @api.model
+    def _elit_get_stale_syncs(self, ICP=None):
+        """Return list of (label, last_done_str) for sync types past their staleness threshold.
+
+        A sync type is considered stale only after it completed at least once
+        (no false alarms on fresh installs).
+        """
+        if ICP is None:
+            ICP = self.env["ir.config_parameter"].sudo()
+        now = fields.Datetime.now()
+        checks = [
+            (
+                _("Productos nuevos ELIT"),
+                ELIT_NEW_PRODUCTS_LAST_DONE_KEY,
+                ELIT_NEW_PRODUCTS_STALE_HOURS_KEY,
+                ELIT_NEW_PRODUCTS_STALE_HOURS_DEFAULT,
+            ),
+            (
+                _("Precio/stock ELIT"),
+                ELIT_PRICE_STOCK_LAST_DONE_KEY,
+                ELIT_PRICE_STOCK_STALE_HOURS_KEY,
+                ELIT_PRICE_STOCK_STALE_HOURS_DEFAULT,
+            ),
+        ]
+        stale = []
+        for label, last_key, hours_key, hours_default in checks:
+            last_str = (ICP.get_param(last_key) or "").strip()
+            if not last_str:
+                continue
+            try:
+                last_dt = fields.Datetime.from_string(last_str)
+            except ValueError:
+                continue
+            try:
+                max_hours = float(ICP.get_param(hours_key) or hours_default)
+            except (TypeError, ValueError):
+                max_hours = hours_default
+            if now - last_dt > timedelta(hours=max_hours):
+                stale.append((label, last_str))
+        return stale
+
+    @api.model
+    def _elit_check_sync_staleness(self, ICP):
+        """Sync watchdog: alert when a sync cycle is past its staleness threshold.
+
+        Notifies the configured user via Discuss only on transition to stale
+        (flag in ICP avoids hourly spam); the flag clears itself when syncs are
+        fresh again so a future stall re-notifies.
+        """
+        stale = self._elit_get_stale_syncs(ICP)
+        notified = (ICP.get_param(ELIT_STALE_NOTIFIED_KEY) or "").strip()
+        if not stale:
+            if notified:
+                ICP.set_param(ELIT_STALE_NOTIFIED_KEY, "")
+            return
+        stale_labels = ", ".join(label for label, _last in stale)
+        _logger.warning(
+            "ELIT sync watchdog: stale syncs detected: %s",
+            "; ".join("%s (última: %s)" % (label, last) for label, last in stale),
+        )
+        if notified == stale_labels:
+            return
+        ICP.set_param(ELIT_STALE_NOTIFIED_KEY, stale_labels)
+        notify_uid = int(ICP.get_param("elit.api_notify_user_id") or 0)
+        if not notify_uid:
+            return
+        user = self.env["res.users"].sudo().browse(notify_uid)
+        if not user.exists() or not user.partner_id:
+            return
+        details = "<br/>".join(
+            _("- %(sync)s: última completada %(last)s", sync=label, last=last)
+            for label, last in stale
+        )
+        self.env["mail.thread"].message_notify(
+            partner_ids=user.partner_id.ids,
+            body=_(
+                "<b>ELIT: sincronización vencida</b><br/>"
+                "Las siguientes sincronizaciones no se completaron dentro del "
+                "umbral esperado:<br/>%s",
+                details,
+            ),
+            subject=_("ELIT: sincronización vencida"),
+        )
 
     @api.model
     def _cron_check_elit_api_health(self):
         """Lightweight API ping: fetch 1 product to verify the API is alive.
 
         Updates ICP status flags and sends a Discuss notification to the
-        configured user when the status transitions to error.
+        configured user when the status transitions to error. Also acts as
+        sync watchdog: alerts when a sync cycle has not completed within its
+        staleness threshold (detects silently stalled syncs).
         """
         ICP = self.env["ir.config_parameter"].sudo()
+        # Watchdog first: must run even when the API check below returns early.
+        self._elit_check_sync_staleness(ICP)
         get_param = ICP.get_param
         previous_status = get_param("elit.api_status", "unknown")
 

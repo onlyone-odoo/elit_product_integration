@@ -19,6 +19,7 @@
                     <group string="Configuración">
                         <field name="elit_public_categ_parent_id" placeholder="Ej: Computación"/>
                         <field name="elit_partner_id" domain="[('supplier_rank', '>', 0)]"/>
+                        <field name="elit_company_id" options="{'no_create': True}"/>
                     </group>
                     <group string="Estado API">
                         <field name="elit_api_notify_user_id"/>
@@ -47,6 +48,16 @@
                             <br/>
                             Último offset (update stock):
                             <field name="elit_update_stock_offset" readonly="1" placeholder="0"/>
+                            <br/>
+                            Última sync productos nuevos completada:
+                            <field name="elit_new_products_last_done" readonly="1" placeholder="Nunca"/>
+                            <br/>
+                            Última sync precio/stock completada:
+                            <field name="elit_price_stock_last_done" readonly="1" placeholder="Nunca"/>
+                        </div>
+                        <div colspan="2" invisible="not elit_sync_stale_info">
+                            <span class="text-danger fw-bold">&#9679; Sync vencida:</span>
+                            <field name="elit_sync_stale_info" readonly="1"/>
                         </div>
                     </group>
                 </group>

@@ -39,6 +39,43 @@ class ProductTemplate(models.Model):
         help="URL de imagen desde la API; un cron descarga las imágenes en lote.",
     )
 
+    # ------------------------------------------------------------------
+    # Multi-company helpers
+    # ------------------------------------------------------------------
+
+    @api.model
+    def _elit_get_company_id(self):
+        """Return configured company id for ELIT supplier data, or False (shared)."""
+        # sudo() for ir.config_parameter: safe, module configuration only.
+        raw = (
+            self.env["ir.config_parameter"].sudo().get_param("elit.company_id", "")
+        ).strip()
+        try:
+            return int(raw) if raw else False
+        except (TypeError, ValueError):
+            return False
+
+    @api.model
+    def _elit_get_target_companies(self):
+        """Return companies for which ELIT data (taxes, costs) must be maintained.
+
+        Configured company in Settings, or all companies when not set (shared).
+        """
+        company_id = self._elit_get_company_id()
+        if company_id:
+            company = self.env["res.company"].sudo().browse(company_id)
+            if company.exists():
+                return company
+        return self.env["res.company"].sudo().search([])
+
+    @api.model
+    def _elit_update_cost_all_companies(self, products):
+        """Run replenishment cost update per company (standard_price is company-dependent)."""
+        if not products:
+            return
+        for company in self._elit_get_target_companies():
+            products.with_company(company)._update_cost_from_replenishment_cost()
+
     def update_single_stock_elit(self):
         """Update stock_elit for selected products - LEGACY method (1 API call per product).
 
@@ -120,7 +157,7 @@ class ProductTemplate(models.Model):
 
         # Update costs in batch at the end (much faster)
         if updated_products:
-            updated_products._update_cost_from_replenishment_cost()
+            self._elit_update_cost_all_companies(updated_products)
             _logger.info(
                 "Stock ELIT actualizado para %d productos",
                 len(updated_products),
@@ -230,7 +267,7 @@ class ProductTemplate(models.Model):
                         stats["errors"] += 1
 
             if products_to_update_cost:
-                products_to_update_cost._update_cost_from_replenishment_cost()
+                self._elit_update_cost_all_companies(products_to_update_cost)
             self.env.cr.commit()
 
             if len(api_products) < api_limit:
@@ -258,7 +295,7 @@ class ProductTemplate(models.Model):
         # Update costs in batch at the end (MUCH faster than per-product)
         if products_to_update_cost:
             _logger.info("Updating accounting cost for %d products...", len(products_to_update_cost))
-            products_to_update_cost._update_cost_from_replenishment_cost()
+            self._elit_update_cost_all_companies(products_to_update_cost)
 
         # Final commit
         self.env.cr.commit()
@@ -363,7 +400,7 @@ class ProductTemplate(models.Model):
                 errors += 1
 
         if products_to_update_cost:
-            products_to_update_cost._update_cost_from_replenishment_cost()
+            self._elit_update_cost_all_companies(products_to_update_cost)
 
         done = page_size < api_limit
         if done:
@@ -469,10 +506,13 @@ class ProductTemplate(models.Model):
                 limit=1,
             )
 
+        # company_id explicit (configured or False=shared) for multi-company visibility
+        elit_company_id = self._elit_get_company_id()
         if supplierinfo:
             supplierinfo.write({
                 "price": precio_with_tax,
                 "currency_id": currency_id,
+                "company_id": elit_company_id,
             })
         else:
             # Create supplierinfo for ELIT so the price is available for cost computation
@@ -484,6 +524,7 @@ class ProductTemplate(models.Model):
                 "price": precio_with_tax,
                 "currency_id": currency_id,
                 "delay": 3,
+                "company_id": elit_company_id,
             })
 
     def _elit_download_image(self, force=False):
@@ -581,7 +622,7 @@ class ProductTemplate(models.Model):
 
         cotizacion = float(data.get("cotizacion") or 1.0)
         self._apply_elit_data_to_product(self, productos[0], cotizacion)
-        self._update_cost_from_replenishment_cost()
+        self._elit_update_cost_all_companies(self)
         self._elit_download_image(force=True)
 
     def action_elit_sync_from_api(self):
