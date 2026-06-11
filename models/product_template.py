@@ -1,4 +1,5 @@
 import base64
+import json
 import requests
 import logging
 from odoo import _, fields, models, api
@@ -38,6 +39,22 @@ class ProductTemplate(models.Model):
         string="URL imagen ELIT",
         help="URL de imagen desde la API; un cron descarga las imágenes en lote.",
     )
+    elit_raw_data = fields.Text(
+        string="Raw data API ELIT",
+        readonly=True,
+        copy=False,
+        help="Último JSON crudo recibido de la API ELIT para este producto "
+        "(se actualiza en cada sincronización). Útil para auditar precios, "
+        "cotización e impuestos.",
+    )
+
+    @api.model
+    def _elit_dump_raw_data(self, prod):
+        """Serialize an API product dict to pretty JSON for elit_raw_data."""
+        try:
+            return json.dumps(prod, indent=2, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            return str(prod)
 
     # ------------------------------------------------------------------
     # Multi-company helpers
@@ -471,12 +488,16 @@ class ProductTemplate(models.Model):
             if isinstance(first, str):
                 image_url_elit = first
 
+        # Include page-level cotización in the dump: it is needed to audit prices
+        raw_payload = dict(elit_data)
+        raw_payload["_cotizacion_api"] = cotizacion
         write_vals = {
             "stock_elit": stock,
             "is_elit_product": True,
             "elit_last_sync": fields.Datetime.now(),
             "replenishment_cost_type": "supplier_price",
             "allow_out_of_stock_order": True,
+            "elit_raw_data": self._elit_dump_raw_data(raw_payload),
         }
         if image_url_elit:
             write_vals["elit_image_url"] = image_url_elit

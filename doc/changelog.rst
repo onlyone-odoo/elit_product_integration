@@ -1,3 +1,10 @@
+`17.0.9.0.0`
+------------
+
+- Add elit_raw_data on product.template: last raw API JSON per product
+  (including page cotización) for price/tax auditing, shown in a new
+  "ELIT API" tab on the product form.
+
 `17.0.8.0.0`
 ------------
 

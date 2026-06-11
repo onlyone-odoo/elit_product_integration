@@ -457,10 +457,14 @@ class ElitSyncProcessor(models.AbstractModel):
         if prod.get("imagenes") and prod["imagenes"]:
             image_url_elit = prod["imagenes"][0] if isinstance(prod["imagenes"][0], str) else None
 
+        # Include page-level cotización in the dump: it is needed to audit prices
+        raw_payload = dict(prod)
+        raw_payload["_cotizacion_api"] = cotizacion
         vals = {
             "name": prod.get("nombre") or f"ELIT Product {codigo}",
             "detailed_type": "product",
             "elit_product_code": codigo,
+            "elit_raw_data": self.env["product.template"]._elit_dump_raw_data(raw_payload),
             "barcode": barcode,
             "categ_id": categ.id
             or self.env.ref(
