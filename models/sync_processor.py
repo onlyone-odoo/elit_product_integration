@@ -20,6 +20,9 @@ ELIT_NEW_PRODUCTS_REQUESTED_DATE_KEY = "elit.new_products_sync_requested_date"
 ELIT_NEW_PRODUCTS_DEACTIVATE_PENDING_KEY = "elit.new_products_sync_deactivate_pending"
 CRON_ELIT_NEW_PRODUCTS_BATCH_XML_ID = "elit_product_integration.cron_elit_new_products_batch"
 
+# ELIT API pagination is 0-based (see paginador.offset in official docs).
+ELIT_API_OFFSET_START = 0
+
 # Sync watchdog: last completed cycle timestamps + staleness thresholds (hours).
 # Thresholds can be overridden via ICP keys *_stale_hours.
 ELIT_NEW_PRODUCTS_LAST_DONE_KEY = "elit.new_products_last_done"
@@ -39,17 +42,51 @@ class ElitSyncProcessor(models.AbstractModel):
     _description = "ELIT Product Synchronization Processor"
 
     @api.model
+    def _elit_pagination_done(self, data, offset, limit, page_size):
+        """Return True when the current API page is the last one.
+
+        Prefers ``paginador.total`` from the official API response when present;
+        falls back to a short page (``page_size < limit``) or an empty page.
+        """
+        if page_size <= 0:
+            return True
+        if page_size < limit:
+            return True
+        paginador = data.get("paginador") if isinstance(data, dict) else None
+        if isinstance(paginador, dict) and paginador.get("total") is not None:
+            try:
+                total = int(paginador.get("total"))
+            except (TypeError, ValueError):
+                total = None
+            if total is not None and total >= 0:
+                return (offset + page_size) >= total
+        return False
+
+    @api.model
+    def _elit_read_api_offset(self, ICP, key, default=None):
+        """Read a 0-based API offset from ICP (never negative)."""
+        if default is None:
+            default = ELIT_API_OFFSET_START
+        raw = ICP.get_param(key, str(default))
+        try:
+            offset = int(raw or default)
+        except (TypeError, ValueError):
+            offset = default
+        return max(0, offset)
+
+    @api.model
     def sync_products(self, sync_type="incremental", date_from=None, offset_start=None):
         """Synchronize products from ELIT API.
 
         :param sync_type: 'full' or 'incremental'
         :param date_from: Optional start date for incremental sync
         :param offset_start: Optional starting offset to resume interrupted sync
+            (0-based, as required by the ELIT API)
         """
         get_param = self.env["ir.config_parameter"].sudo().get_param
         set_param = self.env["ir.config_parameter"].sudo().set_param
 
-        offset = offset_start or 1
+        offset = ELIT_API_OFFSET_START if offset_start is None else max(0, int(offset_start))
         set_param(f"elit.{sync_type}_offset", str(offset))
 
         if sync_type == "incremental" and not date_from:
@@ -72,11 +109,11 @@ class ElitSyncProcessor(models.AbstractModel):
                     sync_type, offset,
                 )
                 break
-            updated, batch_seen, api_count = result
+            updated, batch_seen, api_count, done = result
             total_processed += updated
             seen_codes |= batch_seen
 
-            if api_count < limit:
+            if done:
                 _logger.info("Last %s batch: %s products – finalizing", sync_type, updated)
                 break
 
@@ -90,7 +127,7 @@ class ElitSyncProcessor(models.AbstractModel):
             )
 
         # Cleanup
-        set_param(f"elit.{sync_type}_offset", "1")
+        set_param(f"elit.{sync_type}_offset", str(ELIT_API_OFFSET_START))
         if sync_type == "incremental":
             set_param("elit.last_incremental_sync", fields.Datetime.now())
         elif sync_type == "full":
@@ -240,7 +277,7 @@ class ElitSyncProcessor(models.AbstractModel):
         _logger.info("Page received: %s products", len(products))
 
         if not products:
-            return 0, set(), 0
+            return 0, set(), 0, True
 
         # Resolve existing codes for THIS page only when caller did not pass a set
         page_existing = existing_codes
@@ -269,7 +306,9 @@ class ElitSyncProcessor(models.AbstractModel):
             routes=routes,
             ctx=ctx,
         )
-        return stats["processed"], stats["seen_codes"], len(products)
+        done = self._elit_pagination_done(data, offset, limit, len(products))
+        return stats["processed"], stats["seen_codes"], len(products), done
+
 
     @api.model
     def _prepare_batch_context(self):
@@ -787,7 +826,7 @@ class ElitSyncProcessor(models.AbstractModel):
     # ------------------------------------------------------------------
 
     @api.model
-    def _elit_sync_cycle_active(self, ICP, requested_key, offset_key, default_offset="1"):
+    def _elit_sync_cycle_active(self, ICP, requested_key, offset_key, default_offset=None):
         """Return True while a sync cycle is in progress.
 
         The trigger cron stores the cycle start datetime in ``requested_key``;
@@ -796,6 +835,8 @@ class ElitSyncProcessor(models.AbstractModel):
         Safety net: cycles in progress for more than ELIT_SYNC_MAX_CYCLE_HOURS
         are reset (flag + offset) to avoid zombie cycles.
         """
+        if default_offset is None:
+            default_offset = str(ELIT_API_OFFSET_START)
         requested = (ICP.get_param(requested_key) or "").strip()
         if not requested:
             return False
@@ -826,14 +867,14 @@ class ElitSyncProcessor(models.AbstractModel):
     def _action_request_elit_price_stock_sync(self):
         """Called by trigger cron (e.g. every 6h).
 
-        Stores the cycle start datetime, resets offset to 1, and activates
+        Stores the cycle start datetime, resets offset to 0, and activates
         the batch cron so it runs every few minutes until the full ELIT
         catalog is processed.
         """
         ICP = self.env["ir.config_parameter"].sudo()
         now_str = fields.Datetime.to_string(fields.Datetime.now())
         ICP.set_param(ELIT_PRICE_STOCK_REQUESTED_DATE_KEY, now_str)
-        ICP.set_param(ELIT_PRICE_STOCK_OFFSET_KEY, "1")
+        ICP.set_param(ELIT_PRICE_STOCK_OFFSET_KEY, str(ELIT_API_OFFSET_START))
         try:
             self.env.ref(CRON_ELIT_PRICE_STOCK_BATCH_XML_ID).sudo().write(
                 {"active": True}
@@ -953,13 +994,13 @@ class ElitSyncProcessor(models.AbstractModel):
     def _action_request_elit_new_products_sync(self):
         """Called by trigger cron (e.g. every 24h).
 
-        Stores the cycle start datetime, resets offset to 1, and activates
+        Stores the cycle start datetime, resets offset to 0, and activates
         the batch cron so it imports new ELIT products page by page.
         """
         ICP = self.env["ir.config_parameter"].sudo()
         now_str = fields.Datetime.to_string(fields.Datetime.now())
         ICP.set_param(ELIT_NEW_PRODUCTS_REQUESTED_DATE_KEY, now_str)
-        ICP.set_param(ELIT_NEW_PRODUCTS_OFFSET_KEY, "1")
+        ICP.set_param(ELIT_NEW_PRODUCTS_OFFSET_KEY, str(ELIT_API_OFFSET_START))
         try:
             self.env.ref(CRON_ELIT_NEW_PRODUCTS_BATCH_XML_ID).sudo().write(
                 {"active": True}
@@ -990,10 +1031,10 @@ class ElitSyncProcessor(models.AbstractModel):
         ):
             return
 
-        offset = int(ICP.get_param(ELIT_NEW_PRODUCTS_OFFSET_KEY, "1") or "1")
+        offset = self._elit_read_api_offset(ICP, ELIT_NEW_PRODUCTS_OFFSET_KEY)
         limit = 100
 
-        # existing_codes=None → resolve only codes present on the current API page
+        # existing_codes=None: resolve only codes present on the current API page
         result = self._run_sync_batch(
             "full", offset, limit,
             skip_existing=True, existing_codes=None,
@@ -1006,13 +1047,12 @@ class ElitSyncProcessor(models.AbstractModel):
             )
             return
 
-        processed, _seen_codes, api_count = result
+        processed, _seen_codes, api_count, done = result
 
-        if api_count < limit:
-            ICP.set_param(ELIT_NEW_PRODUCTS_OFFSET_KEY, "1")
+        if done:
+            ICP.set_param(ELIT_NEW_PRODUCTS_OFFSET_KEY, str(ELIT_API_OFFSET_START))
             ICP.set_param(ELIT_NEW_PRODUCTS_REQUESTED_DATE_KEY, "")
             ICP.set_param(ELIT_NEW_PRODUCTS_DEACTIVATE_PENDING_KEY, "1")
-            # Watchdog: record cycle completion timestamp
             ICP.set_param(
                 ELIT_NEW_PRODUCTS_LAST_DONE_KEY,
                 fields.Datetime.to_string(fields.Datetime.now()),
@@ -1052,7 +1092,7 @@ class ElitSyncProcessor(models.AbstractModel):
         )
         _logger.info("Found %d existing ELIT products in Odoo", len(existing_codes))
 
-        offset = 1
+        offset = ELIT_API_OFFSET_START
         limit = 100
         total_new = 0
 
@@ -1070,10 +1110,10 @@ class ElitSyncProcessor(models.AbstractModel):
                     offset,
                 )
                 break
-            updated, batch_seen, api_count = result
+            updated, batch_seen, api_count, done = result
             total_new += updated
             existing_codes |= batch_seen
-            if api_count < limit:
+            if done:
                 break
             offset += limit
 
@@ -1202,7 +1242,7 @@ class ElitSyncProcessor(models.AbstractModel):
         try:
             response = requests.post(
                 f"{api_url}{endpoint}",
-                params={"limit": 1, "offset": 1},
+                params={"limit": 1, "offset": 0},
                 json={"user_id": int(user_id_str), "token": token},
                 headers={"Content-Type": "application/json"},
                 timeout=15,
@@ -1240,12 +1280,15 @@ class ElitSyncProcessor(models.AbstractModel):
             return _(
                 "Respuesta ELIT inválida: 'resultado' debe ser una lista, se recibió %s."
             ) % type(resultado).__name__
-        if "cotizacion" not in data:
-            return _("Respuesta ELIT inválida: falta la clave 'cotizacion'.")
-        try:
-            float(data.get("cotizacion") or 0.0)
-        except (TypeError, ValueError):
-            return _("Respuesta ELIT inválida: 'cotizacion' no es numérica.")
+        # codigo / paginador are documented; treat missing cotizacion as soft
+        # (some filtered queries may omit it) but require paginador OR resultado.
+        if "paginador" in data and not isinstance(data.get("paginador"), dict):
+            return _("Respuesta ELIT inválida: 'paginador' debe ser un objeto.")
+        if "cotizacion" in data:
+            try:
+                float(data.get("cotizacion") or 0.0)
+            except (TypeError, ValueError):
+                return _("Respuesta ELIT inválida: 'cotizacion' no es numérica.")
         return False
 
     @api.model

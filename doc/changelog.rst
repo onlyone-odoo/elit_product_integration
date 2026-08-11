@@ -1,3 +1,10 @@
+`17.0.11.0.0`
+-------------
+
+- Fix ELIT API pagination: offset is 0-based (paginador.offset starts at 0).
+  Starting at 1 skipped the first catalog item and could leave gaps.
+- Use paginador.total when present to detect the last page reliably.
+
 `17.0.10.0.0`
 -------------
 

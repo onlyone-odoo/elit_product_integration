@@ -41,10 +41,10 @@
                             <field name="elit_last_incremental_sync" readonly="1" placeholder="Nunca"/>
                             <br/>
                             Último offset (full):
-                            <field name="elit_full_offset" readonly="1" placeholder="1"/>
+                            <field name="elit_full_offset" readonly="1" placeholder="0"/>
                             <br/>
                             Último offset (incremental):
-                            <field name="elit_incremental_offset" readonly="1" placeholder="1"/>
+                            <field name="elit_incremental_offset" readonly="1" placeholder="0"/>
                             <br/>
                             Último offset (update stock):
                             <field name="elit_update_stock_offset" readonly="1" placeholder="0"/>
