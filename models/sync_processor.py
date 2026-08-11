@@ -218,13 +218,141 @@ class ElitSyncProcessor(models.AbstractModel):
             )
             return None
 
+        if not isinstance(data, dict):
+            _logger.error(
+                "ELIT _run_sync_batch: unexpected payload type %s (offset=%s)",
+                type(data).__name__,
+                offset,
+            )
+            return None
+
         cotizacion = float(data.get("cotizacion") or 1.0)
         products = data.get("resultado", [])
+        if products is None:
+            products = []
+        if not isinstance(products, list):
+            _logger.error(
+                "ELIT _run_sync_batch: 'resultado' is not a list (offset=%s)",
+                offset,
+            )
+            return None
 
         _logger.info("Page received: %s products", len(products))
 
         if not products:
             return 0, set(), 0
+
+        # Resolve existing codes for THIS page only when caller did not pass a set
+        page_existing = existing_codes
+        if skip_existing and page_existing is None:
+            page_codes = [
+                prod.get("codigo_alfa")
+                or prod.get("codigo_producto")
+                or (str(prod.get("id")) if prod.get("id") is not None else "")
+                for prod in products
+            ]
+            page_codes = [c for c in page_codes if c]
+            page_existing = set(
+                self.env["product.template"]
+                .search([("elit_product_code", "in", page_codes)])
+                .mapped("elit_product_code")
+            )
+
+        stats = self._import_api_products(
+            products,
+            cotizacion,
+            skip_existing=skip_existing,
+            existing_codes=page_existing,
+            partner=partner,
+            usd=usd,
+            ars=ars,
+            routes=routes,
+            ctx=ctx,
+        )
+        return stats["processed"], stats["seen_codes"], len(products)
+
+    @api.model
+    def _prepare_batch_context(self):
+        """Build partner, currencies, routes and per-batch caches for imports.
+
+        :return: tuple (partner, usd, ars, routes, ctx) or None if credentials missing
+        """
+        get_param = self.env["ir.config_parameter"].sudo().get_param
+        user_id_str = get_param("elit.user_id")
+        token = get_param("elit.token")
+        if not user_id_str or not token:
+            return None
+
+        usd = self.env.ref("base.USD")
+        ars = self.env["res.currency"].search([("name", "=", "ARS")], limit=1)
+        routes = self.env.ref("purchase_stock.route_warehouse0_buy") + self.env.ref(
+            "stock.route_warehouse0_mto"
+        )
+
+        partner_id = int(get_param("elit.partner_id") or 0) or False
+        if partner_id:
+            partner = self.env["res.partner"].browse(partner_id)
+            if not partner.exists():
+                partner = self.env["res.partner"].search(
+                    [("name", "ilike", "ELIT")], limit=1
+                )
+        else:
+            partner = self.env["res.partner"].search(
+                [("name", "ilike", "ELIT")], limit=1
+            )
+        if not partner:
+            partner = self.env["res.partner"].create(
+                {"name": "ELIT", "supplier_rank": 1, "is_company": True}
+            )
+            _logger.info("ELIT partner created automatically")
+
+        supplierinfo_map = {
+            si.product_code: si
+            for si in self.env["product.supplierinfo"].search(
+                [("partner_id", "=", partner.id)]
+            )
+            if si.product_code
+        }
+        parent_categ_id = int(get_param("elit.public_categ_parent_id") or 0) or False
+        root_categ = (
+            self.env["product.public.category"].browse(parent_categ_id)
+            if parent_categ_id
+            else None
+        )
+        if not root_categ or not root_categ.exists():
+            root_categ = self._get_or_create_public_categ("Computación")
+        ctx = {
+            "tax_cache": {},
+            "categ_cache": {},
+            "public_categ_cache": {},
+            "supplierinfo_map": supplierinfo_map,
+            "root_categ": root_categ,
+        }
+        return partner, usd, ars, routes, ctx
+
+    @api.model
+    def _import_api_products(
+        self,
+        products,
+        cotizacion,
+        skip_existing=False,
+        existing_codes=None,
+        partner=None,
+        usd=None,
+        ars=None,
+        routes=None,
+        ctx=None,
+    ):
+        """Import/update product.template records from an already-fetched API page.
+
+        :return: dict with processed, errors, seen_codes
+        """
+        if partner is None or usd is None or routes is None or ctx is None:
+            prepared = self._prepare_batch_context()
+            if not prepared:
+                _logger.warning("ELIT _import_api_products: missing credentials.")
+                return {"processed": 0, "errors": 0, "seen_codes": set()}
+            partner, usd, ars, routes, ctx = prepared
 
         first_product_logged = False
         processed = 0
@@ -235,7 +363,9 @@ class ElitSyncProcessor(models.AbstractModel):
 
         for prod in products:
             codigo = (
-                prod.get("codigo_alfa") or prod.get("codigo_producto") or str(prod.get("id", ""))
+                prod.get("codigo_alfa")
+                or prod.get("codigo_producto")
+                or str(prod.get("id", ""))
             )
             if not codigo:
                 continue
@@ -262,13 +392,12 @@ class ElitSyncProcessor(models.AbstractModel):
                         )
                         products_to_update_cost = self.env["product.template"]
                     self.env.cr.commit()
-                    _logger.debug("Committed %s products so far (offset %s)", processed, offset)
+                    _logger.debug("Committed %s products so far", processed)
             except Exception as e:
                 errors += 1
                 _logger.error(
-                    "Error processing product %s (offset %s): %s",
+                    "Error processing product %s: %s",
                     codigo,
-                    offset,
                     str(e),
                     exc_info=True,
                 )
@@ -283,14 +412,15 @@ class ElitSyncProcessor(models.AbstractModel):
             self.env.cr.commit()
 
         _logger.info(
-            "Batch processed: %s products, %s errors (%s, offset=%s)",
+            "ELIT import page: %s products, %s errors",
             processed,
             errors,
-            sync_type,
-            offset,
         )
-
-        return processed, seen_codes, len(products)
+        return {
+            "processed": processed,
+            "errors": errors,
+            "seen_codes": seen_codes,
+        }
 
     @api.model
     def _elit_tax_ids_for_rate(self, iva_rate, type_tax_use):
@@ -347,7 +477,6 @@ class ElitSyncProcessor(models.AbstractModel):
                 "supplierinfo_map": {},
                 "root_categ": self._get_or_create_public_categ("Computación"),
             }
-        get_param = self.env["ir.config_parameter"].sudo().get_param
 
         codigo = (
             prod.get("codigo_alfa") or prod.get("codigo_producto") or str(prod["id"])
@@ -368,15 +497,6 @@ class ElitSyncProcessor(models.AbstractModel):
             precio_costo_with_tax = precio_costo
 
         moneda = prod.get("moneda", 1)
-        base_cost_usd = (
-            precio_costo_with_tax
-            if moneda == 2
-            else (
-                precio_costo_with_tax / cotizacion
-                if cotizacion
-                else precio_costo_with_tax
-            )
-        )
 
         # Internal categories (cached)
         categ_key = (prod.get("categoria") or "", prod.get("sub_categoria") or "")
@@ -418,18 +538,8 @@ class ElitSyncProcessor(models.AbstractModel):
             if ean_str and ean_str != "0" and len(ean_str) >= 8:
                 barcode = ean_str
 
-        # Dimensions → volume
-        dims = prod.get("dimensiones", {})
-        largo = float(dims.get("largo") or 0.0)
-        ancho = float(dims.get("ancho") or 0.0)
-        alto = float(dims.get("alto") or 0.0)
-        volume = (
-            (largo * ancho * alto) / 1_000_000.0
-            if largo > 0 and ancho > 0 and alto > 0
-            else 0.0
-        )
-
-        peso_cubico = float(prod.get("peso_cubico") or 0.0)
+        # Dimensions → volume (+ Zippin size fields when available)
+        dim_vals = self.env["product.template"]._elit_dimension_write_vals(prod)
         warranty_text = (prod.get("garantia") or "").strip() or "Sin garantía"
         description = prod.get("descripcion") or False
 
@@ -471,10 +581,8 @@ class ElitSyncProcessor(models.AbstractModel):
                 "product.product_category_all", raise_if_not_found=False
             ).id,
             "weight": float(prod.get("peso") or 0.0),
-            "elit_volumetric_weight": peso_cubico,
             "elit_warranty_months": warranty_text,
             "description_sale": description,
-            "volume": volume,
             "elit_brand": prod.get("marca"),
             "is_gamer": bool(prod.get("gamer")),
             "stock_elit": float(prod.get("stock_total") or 0.0),
@@ -486,10 +594,8 @@ class ElitSyncProcessor(models.AbstractModel):
             "supplier_taxes_id": supplier_taxes_ids,
             "elit_image_url": image_url_elit,
             "allow_out_of_stock_order": True,
-            "zippin_product_length": largo,
-            "zippin_product_width": ancho,
-            "zippin_product_height": alto,
         }
+        vals.update(dim_vals)
 
         # Public categories (cached)
         root_categ = ctx.get("root_categ")
@@ -887,18 +993,10 @@ class ElitSyncProcessor(models.AbstractModel):
         offset = int(ICP.get_param(ELIT_NEW_PRODUCTS_OFFSET_KEY, "1") or "1")
         limit = 100
 
-        existing_codes = set(
-            self.env["product.template"]
-            .search([
-                ("is_elit_product", "=", True),
-                ("elit_product_code", "!=", False),
-            ])
-            .mapped("elit_product_code")
-        )
-
+        # existing_codes=None → resolve only codes present on the current API page
         result = self._run_sync_batch(
             "full", offset, limit,
-            skip_existing=True, existing_codes=existing_codes,
+            skip_existing=True, existing_codes=None,
         )
 
         if result is None:
@@ -1110,16 +1208,45 @@ class ElitSyncProcessor(models.AbstractModel):
                 timeout=15,
             )
             response.raise_for_status()
+            data = response.json()
         except Exception as e:
             self._elit_health_set_error(
                 ICP, now_str, str(e)[:500], previous_status,
             )
             return
 
+        # Validate response shape (API docs are unreliable; catch silent breakage)
+        shape_error = self._elit_validate_api_payload(data)
+        if shape_error:
+            self._elit_health_set_error(ICP, now_str, shape_error, previous_status)
+            return
+
         ICP.set_param("elit.api_status", "ok")
         ICP.set_param("elit.api_last_check", now_str)
         ICP.set_param("elit.api_last_error", "")
         _logger.info("ELIT API health check: OK")
+
+    @api.model
+    def _elit_validate_api_payload(self, data):
+        """Return an error message if the API payload shape looks wrong, else False."""
+        if not isinstance(data, dict):
+            return _(
+                "Respuesta ELIT inválida: se esperaba un objeto JSON, se recibió %s."
+            ) % type(data).__name__
+        if "resultado" not in data:
+            return _("Respuesta ELIT inválida: falta la clave 'resultado'.")
+        resultado = data.get("resultado")
+        if resultado is not None and not isinstance(resultado, list):
+            return _(
+                "Respuesta ELIT inválida: 'resultado' debe ser una lista, se recibió %s."
+            ) % type(resultado).__name__
+        if "cotizacion" not in data:
+            return _("Respuesta ELIT inválida: falta la clave 'cotizacion'.")
+        try:
+            float(data.get("cotizacion") or 0.0)
+        except (TypeError, ValueError):
+            return _("Respuesta ELIT inválida: 'cotizacion' no es numérica.")
+        return False
 
     @api.model
     def _elit_health_set_error(self, ICP, now_str, error_msg, previous_status):

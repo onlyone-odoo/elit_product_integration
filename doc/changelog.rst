@@ -1,3 +1,18 @@
+`17.0.10.0.0`
+-------------
+
+- Refresh dimensions (volume / Zippin size / volumetric weight) on every
+  price-stock apply, not only on create/full import.
+- Cart live-stock check: fall back to stored stock_elit on API errors instead
+  of treating failures as zero stock.
+- Price/stock batch now creates missing products from the same API page
+  (unified sync).
+- New-products batch resolves existing codes per page only (no full catalog
+  search each run).
+- Wizard activates trigger+batch crons instead of a monolithic full-loop.
+- Stronger API health check: validate JSON shape (resultado, cotizacion).
+- Remove tracked __pycache__; add .gitignore.
+
 `17.0.9.0.0`
 ------------
 

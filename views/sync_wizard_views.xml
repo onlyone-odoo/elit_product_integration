@@ -7,8 +7,12 @@
             <form string="Sincronizar Productos ELIT">
                 <group>
                     <field name="sync_type"/>
-                    <field name="date_from" invisible="sync_type == 'full'"/>
-                    <field name="offset_start" invisible="sync_type == 'incremental'"/>
+                    <div colspan="2" class="text-muted">
+                        Activa los crons de lotes (1 página API por ejecución).
+                        No lanza un loop completo en esta petición HTTP.
+                    </div>
+                    <field name="date_from" invisible="1"/>
+                    <field name="offset_start" invisible="1"/>
                 </group>
                 <footer>
                     <button name="action_sync" string="Iniciar Sincronización" type="object" class="btn-primary"/>

@@ -1,4 +1,4 @@
-from odoo import api, models, fields
+from odoo import _, api, models, fields
 
 
 class ElitSyncWizard(models.TransientModel):
@@ -7,27 +7,46 @@ class ElitSyncWizard(models.TransientModel):
 
     sync_type = fields.Selection(
         [
-            ("full", "Full Synchronization"),
-            ("incremental", "Incremental Synchronization"),
+            (
+                "full",
+                "Catálogo completo (activa lotes: productos nuevos + precio/stock)",
+            ),
+            (
+                "incremental",
+                "Precio y stock (activa lote de actualización)",
+            ),
         ],
         default="incremental",
         required=True,
+        help="No ejecuta un loop monolítico: activa los crons de lotes "
+        "(una página API por ejecución) para evitar timeouts del worker.",
     )
-    date_from = fields.Datetime(string="From Date (optional)")
+    date_from = fields.Datetime(
+        string="From Date (optional)",
+        help="Solo aplica al modo legacy full-loop (acción de servidor).",
+    )
     offset_start = fields.Integer(
         string="Initial Offset (to resume)",
         default=1,
-        help="If the sync was interrupted, enter the last successful offset + 100 to resume",
+        help="Reservado para reanudación manual del modo legacy full-loop.",
     )
 
     def action_sync(self):
-        """Launch the batch sync process."""
-        self.env["elit.sync.processor"].sync_products(
-            sync_type=self.sync_type,
-            date_from=self.date_from,
-            offset_start=self.offset_start if self.sync_type == "full" else None,
-        )
-        message = f"ELIT {self.sync_type} sync launched in background (check logs for progress)."
+        """Activate trigger+batch crons instead of a monolithic full-loop sync."""
+        processor = self.env["elit.sync.processor"]
+        if self.sync_type == "full":
+            processor._action_request_elit_new_products_sync()
+            processor._action_request_elit_price_stock_sync()
+            message = _(
+                "Sync ELIT catálogo completo solicitado: se activaron los lotes "
+                "de productos nuevos y de precio/stock. Seguí el progreso en los logs."
+            )
+        else:
+            processor._action_request_elit_price_stock_sync()
+            message = _(
+                "Sync ELIT precio/stock solicitado: se activó el cron de lotes. "
+                "Seguí el progreso en los logs."
+            )
         self.env["bus.bus"]._sendone(
             self.env.user.partner_id,
             "simple_notification",
@@ -41,5 +60,5 @@ class ElitSyncWizard(models.TransientModel):
 
     @api.model
     def action_sync_incremental(self):
-        """Called by daily cron – now launches batch."""
-        self.env["elit.sync.processor"].sync_products(sync_type="incremental")
+        """Activate price/stock batch sync (safe for scheduled use)."""
+        self.env["elit.sync.processor"]._action_request_elit_price_stock_sync()

@@ -56,6 +56,52 @@ class ProductTemplate(models.Model):
         except (TypeError, ValueError):
             return str(prod)
 
+    @api.model
+    def _elit_parse_dimensions(self, elit_data):
+        """Parse dimension fields from an ELIT API product dict.
+
+        :return: dict with keys length, width, height, volume, peso_cubico
+        """
+        dims = elit_data.get("dimensiones") or {}
+        if not isinstance(dims, dict):
+            dims = {}
+        length = float(dims.get("largo") or 0.0)
+        width = float(dims.get("ancho") or 0.0)
+        height = float(dims.get("alto") or 0.0)
+        volume = (
+            (length * width * height) / 1_000_000.0
+            if length > 0 and width > 0 and height > 0
+            else 0.0
+        )
+        return {
+            "length": length,
+            "width": width,
+            "height": height,
+            "volume": volume,
+            "peso_cubico": float(elit_data.get("peso_cubico") or 0.0),
+        }
+
+    @api.model
+    def _elit_dimension_write_vals(self, elit_data):
+        """Build write vals for volume / volumetric weight / Zippin size fields.
+
+        Zippin fields are only included when present on the model (zippin branch).
+        """
+        parsed = self._elit_parse_dimensions(elit_data)
+        vals = {
+            "volume": parsed["volume"],
+            "elit_volumetric_weight": parsed["peso_cubico"],
+        }
+        if "zippin_product_length" in self._fields:
+            vals.update(
+                {
+                    "zippin_product_length": parsed["length"],
+                    "zippin_product_width": parsed["width"],
+                    "zippin_product_height": parsed["height"],
+                }
+            )
+        return vals
+
     # ------------------------------------------------------------------
     # Multi-company helpers
     # ------------------------------------------------------------------
@@ -391,7 +437,6 @@ class ProductTemplate(models.Model):
         api_codes = [c for c in api_codes if c]
         if api_codes:
             products = self.search([
-                ("is_elit_product", "=", True),
                 ("elit_product_code", "in", api_codes),
             ])
             code_to_product = {
@@ -401,12 +446,17 @@ class ProductTemplate(models.Model):
             code_to_product = {}
 
         updated = 0
+        created = 0
         errors = 0
         products_to_update_cost = self.env["product.template"]
+        missing_prods = []
 
         for prod in api_products:
             codigo = prod.get("codigo_alfa") or prod.get("codigo_producto")
-            if not codigo or codigo not in code_to_product:
+            if not codigo:
+                continue
+            if codigo not in code_to_product:
+                missing_prods.append(prod)
                 continue
             try:
                 self._apply_elit_data_to_product(code_to_product[codigo], prod, cotizacion)
@@ -415,6 +465,14 @@ class ProductTemplate(models.Model):
             except Exception as e:
                 _logger.error("ELIT price/stock batch: error updating %s: %s", codigo, e)
                 errors += 1
+
+        # Create products present in the API page but missing in Odoo (unified sync).
+        if missing_prods:
+            create_stats = self.env["elit.sync.processor"]._import_api_products(
+                missing_prods, cotizacion, skip_existing=False
+            )
+            created = create_stats.get("processed", 0)
+            errors += create_stats.get("errors", 0)
 
         if products_to_update_cost:
             self._elit_update_cost_all_companies(products_to_update_cost)
@@ -430,11 +488,13 @@ class ProductTemplate(models.Model):
 
         self.env.cr.commit()
         _logger.info(
-            "ELIT price/stock batch page done: updated=%d errors=%d offset=%d page_size=%d done=%s",
-            updated, errors, api_offset, page_size, done,
+            "ELIT price/stock batch page done: updated=%d created=%d errors=%d "
+            "offset=%d page_size=%d done=%s",
+            updated, created, errors, api_offset, page_size, done,
         )
         return {
             "updated": updated,
+            "created": created,
             "errors": errors,
             "api_offset": api_offset,
             "page_size": page_size,
@@ -499,6 +559,7 @@ class ProductTemplate(models.Model):
             "allow_out_of_stock_order": True,
             "elit_raw_data": self._elit_dump_raw_data(raw_payload),
         }
+        write_vals.update(self._elit_dimension_write_vals(elit_data))
         if image_url_elit:
             write_vals["elit_image_url"] = image_url_elit
         product.write(write_vals)
