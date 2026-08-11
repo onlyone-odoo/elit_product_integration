@@ -280,7 +280,9 @@ class ProductTemplate(models.Model):
         started_from_zero = api_offset == 0
 
         while True:
-            params = {"limit": api_limit, "offset": api_offset}
+            params = self.env["elit.sync.processor"]._elit_list_query_params(
+                api_limit, api_offset
+            )
 
             try:
                 response = requests.post(
@@ -294,7 +296,11 @@ class ProductTemplate(models.Model):
                 data = response.json()
                 stats["total_api_calls"] += 1
             except Exception as e:
-                _logger.error("Error fetching ELIT API (offset %d): %s", api_offset, e)
+                _logger.error(
+                    "Error fetching ELIT API (offset %d): %s",
+                    api_offset,
+                    self.env["elit.sync.processor"]._elit_http_error_detail(e),
+                )
                 stats["errors"] += 1
                 break
 
@@ -412,7 +418,7 @@ class ProductTemplate(models.Model):
         try:
             response = requests.post(
                 f"{api_url}{endpoint}",
-                params={"limit": api_limit, "offset": api_offset},
+                params=Processor._elit_list_query_params(api_limit, api_offset),
                 json=payload,
                 headers=headers,
                 timeout=30,
@@ -420,7 +426,11 @@ class ProductTemplate(models.Model):
             response.raise_for_status()
             data = response.json()
         except Exception as e:
-            _logger.error("ELIT price/stock batch: API error (offset %d): %s", api_offset, e)
+            _logger.error(
+                "ELIT price/stock batch: API error (offset %d): %s",
+                api_offset,
+                Processor._elit_http_error_detail(e),
+            )
             return {"updated": 0, "errors": 1, "api_offset": api_offset, "page_size": 0, "done": False}
 
         api_products = data.get("resultado", []) or []
