@@ -158,10 +158,10 @@ class ResConfigSettings(models.TransientModel):
                 # Cargar offsets
                 "elit_full_offset": self.env["ir.config_parameter"]
                 .sudo()
-                .get_param("elit.full_offset", "1"),
+                .get_param("elit.full_offset", "0"),
                 "elit_incremental_offset": self.env["ir.config_parameter"]
                 .sudo()
-                .get_param("elit.incremental_offset", "1"),
+                .get_param("elit.incremental_offset", "0"),
                 "elit_update_stock_offset": self.env["ir.config_parameter"]
                 .sudo()
                 .get_param("elit.update_stock_offset", "0"),

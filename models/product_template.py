@@ -275,10 +275,9 @@ class ProductTemplate(models.Model):
 
         ICP = self.env["ir.config_parameter"].sudo()
         api_limit = 100
-        api_offset = int(ICP.get_param("elit.update_stock_offset", "1") or "1")
-        if api_offset < 1:
-            api_offset = 1
-        started_from_one = api_offset == 1
+        Processor = self.env["elit.sync.processor"]
+        api_offset = Processor._elit_read_api_offset(ICP, "elit.update_stock_offset")
+        started_from_zero = api_offset == 0
 
         while True:
             params = {"limit": api_limit, "offset": api_offset}
@@ -299,7 +298,11 @@ class ProductTemplate(models.Model):
                 stats["errors"] += 1
                 break
 
-            api_products = data.get("resultado", [])
+            api_products = data.get("resultado", []) or []
+            if not isinstance(api_products, list):
+                _logger.error("ELIT update_stock_batch: 'resultado' is not a list")
+                stats["errors"] += 1
+                break
             cotizacion = float(data.get("cotizacion") or 1.0)
 
             if not api_products:
@@ -333,7 +336,9 @@ class ProductTemplate(models.Model):
                 self._elit_update_cost_all_companies(products_to_update_cost)
             self.env.cr.commit()
 
-            if len(api_products) < api_limit:
+            if Processor._elit_pagination_done(
+                data, api_offset, api_limit, len(api_products)
+            ):
                 ICP.set_param("elit.update_stock_offset", "0")
                 _logger.info("Stock update complete, offset reset to 0")
                 break
@@ -342,9 +347,9 @@ class ProductTemplate(models.Model):
             ICP.set_param("elit.update_stock_offset", str(api_offset))
             _logger.info("Saved resume offset %d", api_offset)
 
-        # Mark products not found in API only when we completed a full pass from offset 1
+        # Mark products not found in API only when we completed a full pass from offset 0
         not_found_codes = all_codes - found_codes
-        if started_from_one and not_found_codes:
+        if started_from_zero and not_found_codes:
             not_found_products = self.browse([
                 code_to_product[code].id for code in not_found_codes
             ])
@@ -378,13 +383,15 @@ class ProductTemplate(models.Model):
         """Fetch ONE page from ELIT API and apply stock/cost data to matching products.
 
         Reads ``elit.update_stock_offset`` from ICP; after processing, saves
-        the next offset (or resets to 1 when the last page is reached).
+        the next offset (or resets to 0 when the last page is reached).
+        Pagination is 0-based per ELIT API docs (``paginador.offset``).
 
         :return: dict with keys *updated*, *errors*, *api_offset*, *page_size*,
                  *done* (bool).  Returns ``None`` when API is not configured.
         """
         ICP = self.env["ir.config_parameter"].sudo()
         get_param = ICP.get_param
+        Processor = self.env["elit.sync.processor"]
 
         user_id_str = get_param("elit.user_id")
         token = get_param("elit.token")
@@ -400,9 +407,7 @@ class ProductTemplate(models.Model):
         headers = {"Content-Type": "application/json"}
 
         api_limit = 100
-        api_offset = int(get_param("elit.update_stock_offset", "1") or "1")
-        if api_offset < 1:
-            api_offset = 1
+        api_offset = Processor._elit_read_api_offset(ICP, "elit.update_stock_offset")
 
         try:
             response = requests.post(
@@ -418,13 +423,16 @@ class ProductTemplate(models.Model):
             _logger.error("ELIT price/stock batch: API error (offset %d): %s", api_offset, e)
             return {"updated": 0, "errors": 1, "api_offset": api_offset, "page_size": 0, "done": False}
 
-        api_products = data.get("resultado", [])
+        api_products = data.get("resultado", []) or []
+        if not isinstance(api_products, list):
+            _logger.error("ELIT price/stock batch: 'resultado' is not a list")
+            return {"updated": 0, "errors": 1, "api_offset": api_offset, "page_size": 0, "done": False}
         cotizacion = float(data.get("cotizacion") or 1.0)
         page_size = len(api_products)
 
         if not api_products:
             _logger.info("ELIT price/stock batch: no more products at offset %d.", api_offset)
-            ICP.set_param("elit.update_stock_offset", "1")
+            ICP.set_param("elit.update_stock_offset", "0")
             self.env.cr.commit()
             return {"updated": 0, "errors": 0, "api_offset": api_offset, "page_size": 0, "done": True}
 
@@ -468,7 +476,7 @@ class ProductTemplate(models.Model):
 
         # Create products present in the API page but missing in Odoo (unified sync).
         if missing_prods:
-            create_stats = self.env["elit.sync.processor"]._import_api_products(
+            create_stats = Processor._import_api_products(
                 missing_prods, cotizacion, skip_existing=False
             )
             created = create_stats.get("processed", 0)
@@ -477,10 +485,10 @@ class ProductTemplate(models.Model):
         if products_to_update_cost:
             self._elit_update_cost_all_companies(products_to_update_cost)
 
-        done = page_size < api_limit
+        done = Processor._elit_pagination_done(data, api_offset, api_limit, page_size)
         if done:
-            ICP.set_param("elit.update_stock_offset", "1")
-            _logger.info("ELIT price/stock batch: last page reached, offset reset to 1.")
+            ICP.set_param("elit.update_stock_offset", "0")
+            _logger.info("ELIT price/stock batch: last page reached, offset reset to 0.")
         else:
             new_offset = api_offset + api_limit
             ICP.set_param("elit.update_stock_offset", str(new_offset))
