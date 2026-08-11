@@ -18,6 +18,17 @@
                        options="{'terminology': {'active': 'Producto Gamer', 'inactive': 'No gamer'}}"/>
                        <field name="elit_product_code" string="Código ELIT"/>
                        <field name="stock_elit" string="Stock en ELIT" readonly="1"/>
+                       <field name="is_elit_product" invisible="1"/>
+            </xpath>
+
+            <!-- Raw data de la API (auditoría de precios/impuestos) -->
+            <xpath expr="//notebook" position="inside">
+                <page string="ELIT API" name="elit_api_raw" invisible="not is_elit_product">
+                    <group>
+                        <field name="elit_last_sync" readonly="1"/>
+                    </group>
+                    <field name="elit_raw_data" readonly="1" widget="text" nolabel="1"/>
+                </page>
             </xpath>
 
         </field>

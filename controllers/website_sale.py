@@ -2,7 +2,6 @@
 from odoo import http
 from odoo.http import request
 from odoo.addons.website_sale.controllers.main import WebsiteSale
-from odoo.exceptions import UserError
 import requests
 import logging
 
@@ -24,10 +23,10 @@ class WebsiteSaleElit(WebsiteSale):
         template = product.product_tmpl_id
 
         if template.is_elit_product:
-            # Consulta API en vivo para stock real de ELIT
-            stock_elit = self._get_elit_stock_real_time(template.elit_product_code)
+            stock_elit = self._get_elit_stock_real_time(
+                template.elit_product_code, template=template
+            )
             if stock_elit <= 0:
-                # Eliminar la línea si no hay stock
                 sale_order = request.website.sale_get_order()
                 if sale_order:
                     line = sale_order.order_line.filtered(
@@ -35,26 +34,40 @@ class WebsiteSaleElit(WebsiteSale):
                     )
                     if line:
                         line.unlink()
-                # Mensaje al cliente
                 request.session[
                     "website_sale_cart_error"
                 ] = "El producto no tiene stock disponible en el proveedor y fue eliminado del carrito."
                 return request.redirect("/shop/cart")
 
-        # Continuar con el cart_update normal
         return super(WebsiteSaleElit, self).cart_update(
             product_id, add_qty=add_qty, set_qty=set_qty, **kw
         )
 
-    def _get_elit_stock_real_time(self, codigo):
-        """Consulta API ELIT en vivo para stock de un producto."""
+    def _get_elit_stock_real_time(self, codigo, template=None):
+        """Consulta API ELIT en vivo para stock de un producto.
+
+        On API failure (or missing credentials/code), falls back to the last
+        stored ``stock_elit`` on the template so a transient error does not
+        empty the cart.
+        """
+        fallback = float(template.stock_elit or 0.0) if template else 0.0
+        if not codigo:
+            return fallback
+
         get_param = request.env["ir.config_parameter"].sudo().get_param
-        user_id = int(get_param("elit.user_id"))
+        user_id_str = get_param("elit.user_id")
         token = get_param("elit.token")
+        if not user_id_str or not token:
+            _logger.warning(
+                "ELIT live stock: missing credentials, using stock_elit fallback for %s",
+                codigo,
+            )
+            return fallback
+
         api_url = get_param("elit.api_url", "https://clientes.elit.com.ar").rstrip("/")
         endpoint = get_param("elit.endpoint", "/v1/api/productos")
 
-        payload = {"user_id": user_id, "token": token}
+        payload = {"user_id": int(user_id_str), "token": token}
         headers = {"Content-Type": "application/json"}
         params = {"codigo_alfa": codigo, "limit": 1}
 
@@ -71,10 +84,14 @@ class WebsiteSaleElit(WebsiteSale):
             products = data.get("resultado", [])
             if products:
                 return float(products[0].get("stock_total") or 0.0)
+            # Product explicitly not found in API
             return 0.0
         except Exception as e:
             _logger.warning(
-                "Error consultando stock ELIT en vivo para %s: %s", codigo, e
+                "Error consultando stock ELIT en vivo para %s: %s "
+                "(fallback stock_elit=%.2f)",
+                codigo,
+                e,
+                fallback,
             )
-            # Fallback a stock_elit guardado si API falla
-            return 0.0  # O request.env['product.template'].sudo().search([('default_code', '=', codigo)], limit=1).stock_elit or 0.0
+            return fallback

@@ -1,8 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo noupdate="0">
-    <!-- Note: noupdate="0" para que los crons se actualicen al upgrade del módulo.
-         El post_init_hook asegura que los cambios se apliquen correctamente. -->
-    <!-- Trigger: cada 24h solicita importación de nuevos productos y activa el batch. -->
+    <!-- Legacy crons removed: use trigger+batch+scheduled actions instead -->
+    <delete model="ir.cron" id="cron_elit_update_stock_daily"/>
+    <delete model="ir.cron" id="cron_elit_incremental"/>
+
+    <!--
+        Batched API sync pattern (see odoo-batched-api-sync skill):
+        Trigger (interval) → sets ICP + activates Batch cron
+        Batch (5 min, starts inactive) → ONE API page per run, advances offset
+        Cleanup (10 min, active) → deactivates Batch when finished (cron cannot
+        deactivate itself due to row lock).
+
+        Priority: Trigger < Batch < Cleanup (lower number = higher priority).
+    -->
+
+    <!-- === New products: trigger + batch (cleanup shared below) === -->
     <record id="cron_elit_new_products" model="ir.cron">
         <field name="name">ELIT: Activar importación de productos nuevos</field>
         <field name="interval_number">1</field>
@@ -16,9 +28,6 @@
         <field name="priority">5</field>
     </record>
 
-    <!-- Batch: corre cada 5 min SOLO cuando el trigger lo activa. Procesa 1 página API
-         (~100 productos) por ejecución. Solo crea productos nuevos (no existentes en Odoo).
-         Se desactiva automáticamente al terminar el ciclo vía cleanup cron. -->
     <record id="cron_elit_new_products_batch" model="ir.cron">
         <field name="name">ELIT: Lotes de importación productos nuevos</field>
         <field name="model_id" ref="model_elit_sync_processor"/>
@@ -32,21 +41,7 @@
         <field name="priority">7</field>
     </record>
 
-    <!-- LEGACY: Full-loop stock update (desactivado, reemplazado por trigger+batch).
-         El método update_all_elit_stock_and_cost() sigue disponible como acción de servidor. -->
-    <record id="cron_elit_update_stock_daily" model="ir.cron">
-        <field name="name">ELIT: Actualizar Stock y Costo LEGACY (full loop)</field>
-        <field name="interval_number">6</field>
-        <field name="interval_type">hours</field>
-        <field name="model_id" ref="model_elit_sync_processor"/>
-        <field name="state">code</field>
-        <field name="code">model.update_all_elit_stock_and_cost()</field>
-        <field name="user_id" ref="base.user_root"/>
-        <field name="active" eval="False"/>
-        <field name="priority">10</field>
-    </record>
-
-    <!-- Trigger: cada 6h solicita sync de precio/stock y activa el cron de lotes. -->
+    <!-- === Price / stock: trigger + batch === -->
     <record id="cron_elit_price_stock_trigger" model="ir.cron">
         <field name="name">ELIT: Activar sync precio y stock</field>
         <field name="model_id" ref="model_elit_sync_processor"/>
@@ -60,8 +55,6 @@
         <field name="priority">8</field>
     </record>
 
-    <!-- Batch: corre cada 5 min SOLO cuando el trigger lo activa. Procesa 1 página API
-         (~100 productos) por ejecución. Se desactiva automáticamente al terminar el ciclo. -->
     <record id="cron_elit_price_stock_batch" model="ir.cron">
         <field name="name">ELIT: Lotes de sync precio y stock</field>
         <field name="model_id" ref="model_elit_sync_processor"/>
@@ -75,10 +68,9 @@
         <field name="priority">10</field>
     </record>
 
-    <!-- Cleanup: cada 10 min verifica si el cron de lotes pidió desactivarse y lo desactiva.
-         Necesario porque un cron no puede escribirse a sí mismo (row lock). -->
+    <!-- === Shared cleanup for all batch crons that request deactivation === -->
     <record id="cron_elit_deactivate_batch_if_pending" model="ir.cron">
-        <field name="name">ELIT: Desactivar cron de lotes si corresponde</field>
+        <field name="name">ELIT: Desactivar crons de lotes si corresponde</field>
         <field name="model_id" ref="model_elit_sync_processor"/>
         <field name="state">code</field>
         <field name="code">model._cron_elit_deactivate_batch_if_pending()</field>
@@ -90,7 +82,7 @@
         <field name="priority">20</field>
     </record>
 
-    <!-- Cron: Descargar imágenes ELIT en lote (baja prioridad) -->
+    <!-- === Auxiliary (not trigger/batch; safe to run independently) === -->
     <record id="cron_elit_sync_images" model="ir.cron">
         <field name="name">ELIT: Descargar imágenes (batch)</field>
         <field name="interval_number">2</field>
@@ -98,12 +90,12 @@
         <field name="model_id" ref="model_elit_sync_processor"/>
         <field name="state">code</field>
         <field name="code">model.sync_elit_images_batch(batch_size=20)</field>
+        <field name="numbercall">-1</field>
         <field name="user_id" ref="base.user_root"/>
         <field name="active" eval="True"/>
         <field name="priority">20</field>
     </record>
 
-    <!-- Cron: Publicar/despublicar según stock -->
     <record id="cron_auto_publish_elit" model="ir.cron">
         <field name="name">ELIT: Publicar productos con stock</field>
         <field name="model_id" ref="model_product_template"/>
@@ -130,10 +122,10 @@ if to_unpublish:
         <field name="interval_number">1</field>
         <field name="interval_type">hours</field>
         <field name="numbercall">-1</field>
+        <field name="user_id" ref="base.user_root"/>
         <field name="priority">15</field>
     </record>
 
-    <!-- Health check: verifica cada hora si la API ELIT responde. -->
     <record id="cron_elit_api_health_check" model="ir.cron">
         <field name="name">ELIT: Health check API</field>
         <field name="model_id" ref="model_elit_sync_processor"/>
@@ -145,17 +137,5 @@ if to_unpublish:
         <field name="user_id" ref="base.user_root"/>
         <field name="active" eval="True"/>
         <field name="priority">25</field>
-    </record>
-
-    <!-- LEGACY: Cron Incremental (desactivado, reemplazado por sync_new_products_only) -->
-    <record id="cron_elit_incremental" model="ir.cron">
-        <field name="name">ELIT: Sincronización Incremental (LEGACY)</field>
-        <field name="interval_number">1</field>
-        <field name="interval_type">days</field>
-        <field name="model_id" ref="model_elit_sync_processor"/>
-        <field name="state">code</field>
-        <field name="code">model.sync_products(sync_type='incremental')</field>
-        <field name="user_id" ref="base.user_root"/>
-        <field name="active" eval="False"/>
     </record>
 </odoo>

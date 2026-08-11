@@ -38,6 +38,15 @@ class ResConfigSettings(models.TransientModel):
         help="Partner usado como proveedor para productos ELIT",
     )
 
+    elit_company_id = fields.Many2one(
+        "res.company",
+        string="Compañía datos ELIT",
+        config_parameter="elit.company_id",
+        help="Compañía para los datos de proveedor sincronizados desde ELIT "
+        "(listas de precios de proveedor, impuestos y costos). "
+        "Vacío = compartido entre todas las compañías.",
+    )
+
     # Nuevos campos para offsets por tipo (reemplazan legacy)
     elit_full_offset = fields.Char(
         string="Último offset procesado (full sync)",
@@ -79,6 +88,21 @@ class ResConfigSettings(models.TransientModel):
         compute="_compute_elit_api_status",
     )
 
+    # Sync watchdog (last completed cycle per sync type)
+    elit_new_products_last_done = fields.Datetime(
+        string="Última sync productos nuevos completada",
+        compute="_compute_elit_sync_status",
+    )
+    elit_price_stock_last_done = fields.Datetime(
+        string="Última sync precio/stock completada",
+        compute="_compute_elit_sync_status",
+    )
+    elit_sync_stale_info = fields.Char(
+        string="Syncs ELIT vencidas",
+        compute="_compute_elit_sync_status",
+        help="Sincronizaciones que superaron el umbral máximo sin completarse.",
+    )
+
     @api.depends("elit_user_id")
     def _compute_elit_api_status(self):
         ICP = self.env["ir.config_parameter"].sudo()
@@ -89,6 +113,18 @@ class ResConfigSettings(models.TransientModel):
             rec.elit_api_status = status if status in ("ok", "error") else "unknown"
             rec.elit_api_last_check = last_check or False
             rec.elit_api_last_error = last_error or False
+
+    @api.depends("elit_user_id")
+    def _compute_elit_sync_status(self):
+        ICP = self.env["ir.config_parameter"].sudo()
+        new_products_last = ICP.get_param("elit.new_products_last_done", False)
+        price_stock_last = ICP.get_param("elit.price_stock_last_done", False)
+        stale = self.env["elit.sync.processor"]._elit_get_stale_syncs(ICP)
+        stale_info = ", ".join(label for label, _last in stale) if stale else False
+        for rec in self:
+            rec.elit_new_products_last_done = new_products_last or False
+            rec.elit_price_stock_last_done = price_stock_last or False
+            rec.elit_sync_stale_info = stale_info
 
     def set_values(self):
         super().set_values()
