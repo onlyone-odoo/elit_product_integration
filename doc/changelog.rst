@@ -1,3 +1,10 @@
+`17.0.12.0.0`
+-------------
+
+- ELIT rejects offset=0 with HTTP 400: omit offset on the first page
+  (matches official curl examples) and only send offset when > 0.
+- Log response body on HTTP errors to ease API debugging.
+
 `17.0.11.0.0`
 -------------
 

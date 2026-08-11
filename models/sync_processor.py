@@ -75,6 +75,30 @@ class ElitSyncProcessor(models.AbstractModel):
         return max(0, offset)
 
     @api.model
+    def _elit_list_query_params(self, limit, offset, extra=None):
+        """Build query params for POST /productos.
+
+        ELIT rejects ``offset=0`` with HTTP 400. Official examples omit offset
+        on the first page; we do the same and only send offset when > 0.
+        """
+        params = {"limit": int(limit)}
+        offset = max(0, int(offset or 0))
+        if offset > 0:
+            params["offset"] = offset
+        if extra:
+            params.update(extra)
+        return params
+
+    @api.model
+    def _elit_http_error_detail(self, exc):
+        """Extract short response body from a requests HTTPError, if any."""
+        resp = getattr(exc, "response", None)
+        if resp is None:
+            return str(exc)
+        body = (resp.text or "")[:500]
+        return "%s | body=%s" % (exc, body)
+
+    @api.model
     def sync_products(self, sync_type="incremental", date_from=None, offset_start=None):
         """Synchronize products from ELIT API.
 
@@ -227,7 +251,7 @@ class ElitSyncProcessor(models.AbstractModel):
             "root_categ": root_categ,
         }
 
-        params = {"limit": limit, "offset": offset}
+        params = self._elit_list_query_params(limit, offset)
         if sync_type == "incremental":
             last_sync_str = get_param("elit.last_incremental_sync")
             last_sync = (
@@ -251,7 +275,7 @@ class ElitSyncProcessor(models.AbstractModel):
         except Exception as e:
             _logger.error(
                 "Error in _run_sync_batch (%s, offset=%s): %s",
-                sync_type, offset, e,
+                sync_type, offset, self._elit_http_error_detail(e),
             )
             return None
 
@@ -1242,7 +1266,7 @@ class ElitSyncProcessor(models.AbstractModel):
         try:
             response = requests.post(
                 f"{api_url}{endpoint}",
-                params={"limit": 1, "offset": 0},
+                params={"limit": 1},
                 json={"user_id": int(user_id_str), "token": token},
                 headers={"Content-Type": "application/json"},
                 timeout=15,

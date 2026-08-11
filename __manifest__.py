@@ -1,6 +1,6 @@
 {
     "name": "ELIT Product Integration",
-    "version": "17.0.11.0.0",
+    "version": "17.0.12.0.0",
     "category": "Inventory/Purchase",
     "summary": "Importación y sincronización de productos desde API ELIT",
     "description": """
