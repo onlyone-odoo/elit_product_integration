@@ -1,3 +1,21 @@
+`17.0.14.0.0`
+-------------
+
+- Settings: ELIT block uses Odoo 17 ``setting`` layout (no cramped
+  one-column sync dump). Buttons start price/stock and new-products
+  cycles from Inventory settings (same as the trigger crons).
+
+`17.0.13.0.0`
+-------------
+
+- Do not reset the batch offset while a sync cycle is still in progress
+  (6h/24h triggers were restarting the catalog walk).
+- Ignore ``paginador.total`` when it equals the page size: that value is
+  ambiguous and stopped price/stock after the first 100 products.
+- Match API codes against ``codigo_alfa``, ``codigo_producto``, hyphen
+  variants and internal prefixes (``LOGMOU910005795`` vs ``910-005795``)
+  so existing reseller SKUs get stock updates instead of duplicates.
+
 `17.0.12.0.0`
 -------------
 

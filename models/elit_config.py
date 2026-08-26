@@ -1,5 +1,5 @@
 # models/elit_config.py
-from odoo import api, fields, models
+from odoo import _, api, fields, models
 
 
 class ResConfigSettings(models.TransientModel):
@@ -125,6 +125,42 @@ class ResConfigSettings(models.TransientModel):
             rec.elit_new_products_last_done = new_products_last or False
             rec.elit_price_stock_last_done = price_stock_last or False
             rec.elit_sync_stale_info = stale_info
+
+    def action_elit_request_price_stock_sync(self):
+        """Activate the price/stock batch cycle (same as the trigger cron)."""
+        self.ensure_one()
+        self.env["elit.sync.processor"]._action_request_elit_price_stock_sync()
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": _("ELIT"),
+                "message": _(
+                    "Sync precio/stock solicitado. Los lotes corren cada "
+                    "5 minutos hasta terminar el catálogo."
+                ),
+                "type": "success",
+                "sticky": False,
+            },
+        }
+
+    def action_elit_request_new_products_sync(self):
+        """Activate the new-products batch cycle (same as the trigger cron)."""
+        self.ensure_one()
+        self.env["elit.sync.processor"]._action_request_elit_new_products_sync()
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": _("ELIT"),
+                "message": _(
+                    "Sync de productos nuevos solicitado. Los lotes corren "
+                    "cada 5 minutos hasta terminar el catálogo."
+                ),
+                "type": "success",
+                "sticky": False,
+            },
+        }
 
     def set_values(self):
         super().set_values()

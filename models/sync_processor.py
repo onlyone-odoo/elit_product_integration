@@ -7,6 +7,7 @@ from datetime import timedelta
 
 from odoo import _, models, api, fields
 from odoo.exceptions import UserError, ValidationError
+from odoo.osv import expression
 
 _logger = logging.getLogger(__name__)
 
@@ -47,6 +48,9 @@ class ElitSyncProcessor(models.AbstractModel):
 
         Prefers ``paginador.total`` from the official API response when present;
         falls back to a short page (``page_size < limit``) or an empty page.
+
+        ``total == limit`` on a full page is ambiguous (catalog size vs items
+        in this response). In that case keep paging until a short/empty page.
         """
         if page_size <= 0:
             return True
@@ -59,6 +63,8 @@ class ElitSyncProcessor(models.AbstractModel):
             except (TypeError, ValueError):
                 total = None
             if total is not None and total >= 0:
+                if total <= limit:
+                    return False
                 return (offset + page_size) >= total
         return False
 
@@ -88,6 +94,165 @@ class ElitSyncProcessor(models.AbstractModel):
         if extra:
             params.update(extra)
         return params
+
+    @api.model
+    def _elit_normalize_vendor_code(self, codigo):
+        """Return an alphanumeric uppercase code (hyphens/spaces stripped)."""
+        if not codigo:
+            return ""
+        return "".join(ch for ch in str(codigo).upper() if ch.isalnum())
+
+    @api.model
+    def _elit_code_matches(self, stored, api_codigo):
+        """Return True if a stored Odoo code refers to the same ELIT SKU.
+
+        Matches exact codes, hyphen variants (``910-005795`` vs ``910005795``)
+        and internal prefixes (``LOGMOU910005795`` vs ``910-005795``).
+        """
+        stored_n = self._elit_normalize_vendor_code(stored)
+        api_n = self._elit_normalize_vendor_code(api_codigo)
+        if not stored_n or not api_n:
+            return False
+        if stored_n == api_n:
+            return True
+        if len(api_n) < 6 or not stored_n.endswith(api_n):
+            return False
+        prefix = stored_n[: -len(api_n)]
+        return bool(prefix) and not prefix[-1].isdigit()
+
+    @api.model
+    def _elit_map_templates_by_api_codes(self, api_codes):
+        """Return ``{api_codigo: product.template}`` for codes on one API page.
+
+        Looks up ``elit_product_code``, ``default_code`` and ELIT
+        ``supplierinfo.product_code``, including hyphen-stripped and prefixed
+        internal SKUs used by some resellers.
+        """
+        Template = self.env["product.template"]
+        codes = [c for c in api_codes if c]
+        if not codes:
+            return {}
+        processor = self
+        norms = {c: processor._elit_normalize_vendor_code(c) for c in codes}
+        exact_alts = list({c for c in codes} | {n for n in norms.values() if n})
+        templates = Template.search(
+            [
+                "|",
+                "|",
+                ("elit_product_code", "in", exact_alts),
+                ("default_code", "in", exact_alts),
+                ("seller_ids.product_code", "in", exact_alts),
+            ]
+        )
+        mapped = {}
+        used_ids = set()
+
+        def _assign(codigo, tmpl):
+            if codigo in mapped or tmpl.id in used_ids:
+                return
+            mapped[codigo] = tmpl
+            used_ids.add(tmpl.id)
+
+        def _sorted_candidates(recordset):
+            return recordset.sorted(
+                key=lambda t: (not t.is_elit_product, t.id)
+            )
+
+        by_elit = {}
+        by_default = {}
+        by_seller = {}
+        for tmpl in _sorted_candidates(templates):
+            if tmpl.elit_product_code and tmpl.elit_product_code not in by_elit:
+                by_elit[tmpl.elit_product_code] = tmpl
+                elit_n = processor._elit_normalize_vendor_code(tmpl.elit_product_code)
+                if elit_n and elit_n not in by_elit:
+                    by_elit[elit_n] = tmpl
+            if tmpl.default_code and tmpl.default_code not in by_default:
+                by_default[tmpl.default_code] = tmpl
+                def_n = processor._elit_normalize_vendor_code(tmpl.default_code)
+                if def_n and def_n not in by_default:
+                    by_default[def_n] = tmpl
+            for seller in tmpl.seller_ids:
+                if seller.product_code and seller.product_code not in by_seller:
+                    by_seller[seller.product_code] = tmpl
+                    sell_n = processor._elit_normalize_vendor_code(seller.product_code)
+                    if sell_n and sell_n not in by_seller:
+                        by_seller[sell_n] = tmpl
+
+        for codigo in codes:
+            for pool in (by_elit, by_default, by_seller):
+                tmpl = pool.get(codigo) or pool.get(norms[codigo])
+                if tmpl:
+                    _assign(codigo, tmpl)
+                    break
+
+        unmatched = [c for c in codes if c not in mapped]
+        suffix_norms = [norms[c] for c in unmatched if len(norms[c]) >= 6]
+        if suffix_norms:
+            like_domains = []
+            for norm in suffix_norms:
+                like_domains.append(
+                    [
+                        "|",
+                        "|",
+                        ("elit_product_code", "=like", "%" + norm),
+                        ("default_code", "=like", "%" + norm),
+                        ("seller_ids.product_code", "=like", "%" + norm),
+                    ]
+                )
+            extra = Template.search(expression.OR(like_domains))
+            for codigo in unmatched:
+                for tmpl in _sorted_candidates(extra):
+                    if tmpl.id in used_ids:
+                        continue
+                    seller_codes = tmpl.seller_ids.mapped("product_code")
+                    if (
+                        processor._elit_code_matches(tmpl.elit_product_code, codigo)
+                        or processor._elit_code_matches(tmpl.default_code, codigo)
+                        or any(
+                            processor._elit_code_matches(code, codigo)
+                            for code in seller_codes
+                        )
+                    ):
+                        _assign(codigo, tmpl)
+                        break
+        return mapped
+
+    @api.model
+    def _elit_ensure_cron_active(self, xml_id):
+        """Activate a cron by xml id when it exists and is inactive."""
+        try:
+            cron = self.env.ref(xml_id, raise_if_not_found=False)
+        except Exception:
+            cron = False
+        if cron and not cron.active:
+            cron.sudo().write({"active": True})
+
+    @api.model
+    def _elit_request_sync_cycle(self, requested_key, offset_key, cron_xml_id, log_label):
+        """Start a sync cycle, or resume if one is already in progress.
+
+        Never reset the offset while a cycle is active. The 6h/24h trigger
+        would otherwise restart the catalog walk before the last pages run.
+        """
+        ICP = self.env["ir.config_parameter"].sudo()
+        if self._elit_sync_cycle_active(ICP, requested_key, offset_key):
+            _logger.info(
+                "ELIT %s: cycle already in progress at offset %s, not resetting.",
+                log_label,
+                ICP.get_param(offset_key),
+            )
+            self._elit_ensure_cron_active(cron_xml_id)
+            return
+        now_str = fields.Datetime.to_string(fields.Datetime.now())
+        ICP.set_param(requested_key, now_str)
+        ICP.set_param(offset_key, str(ELIT_API_OFFSET_START))
+        self._elit_ensure_cron_active(cron_xml_id)
+        _logger.info(
+            "ELIT %s: trigger set cycle start=%s, batch cron activated.",
+            log_label,
+            now_str,
+        )
 
     @api.model
     def _elit_http_error_detail(self, exc):
@@ -306,18 +471,20 @@ class ElitSyncProcessor(models.AbstractModel):
         # Resolve existing codes for THIS page only when caller did not pass a set
         page_existing = existing_codes
         if skip_existing and page_existing is None:
-            page_codes = [
-                prod.get("codigo_alfa")
-                or prod.get("codigo_producto")
-                or (str(prod.get("id")) if prod.get("id") is not None else "")
-                for prod in products
-            ]
-            page_codes = [c for c in page_codes if c]
-            page_existing = set(
-                self.env["product.template"]
-                .search([("elit_product_code", "in", page_codes)])
-                .mapped("elit_product_code")
-            )
+            page_codes = []
+            for prod in products:
+                added = False
+                for key in ("codigo_alfa", "codigo_producto"):
+                    code = prod.get(key)
+                    if not code:
+                        continue
+                    added = True
+                    if code not in page_codes:
+                        page_codes.append(code)
+                if not added and prod.get("id") is not None:
+                    page_codes.append(str(prod.get("id")))
+            mapped = self._elit_map_templates_by_api_codes(page_codes)
+            page_existing = set(mapped.keys())
 
         stats = self._import_api_products(
             products,
@@ -891,26 +1058,15 @@ class ElitSyncProcessor(models.AbstractModel):
     def _action_request_elit_price_stock_sync(self):
         """Called by trigger cron (e.g. every 6h).
 
-        Stores the cycle start datetime, resets offset to 0, and activates
-        the batch cron so it runs every few minutes until the full ELIT
-        catalog is processed.
+        Starts a new cycle only when none is in progress. Resetting the offset
+        on every trigger aborted catalogs larger than one 6h window.
         """
-        ICP = self.env["ir.config_parameter"].sudo()
-        now_str = fields.Datetime.to_string(fields.Datetime.now())
-        ICP.set_param(ELIT_PRICE_STOCK_REQUESTED_DATE_KEY, now_str)
-        ICP.set_param(ELIT_PRICE_STOCK_OFFSET_KEY, str(ELIT_API_OFFSET_START))
-        try:
-            self.env.ref(CRON_ELIT_PRICE_STOCK_BATCH_XML_ID).sudo().write(
-                {"active": True}
-            )
-            _logger.info(
-                "ELIT price/stock sync: trigger set cycle start=%s, batch cron activated.",
-                now_str,
-            )
-        except Exception as e:
-            _logger.warning(
-                "ELIT price/stock sync: could not activate batch cron: %s", e
-            )
+        self._elit_request_sync_cycle(
+            ELIT_PRICE_STOCK_REQUESTED_DATE_KEY,
+            ELIT_PRICE_STOCK_OFFSET_KEY,
+            CRON_ELIT_PRICE_STOCK_BATCH_XML_ID,
+            "price/stock",
+        )
 
     @api.model
     def _cron_elit_price_stock_batch(self):
@@ -1018,26 +1174,15 @@ class ElitSyncProcessor(models.AbstractModel):
     def _action_request_elit_new_products_sync(self):
         """Called by trigger cron (e.g. every 24h).
 
-        Stores the cycle start datetime, resets offset to 0, and activates
-        the batch cron so it imports new ELIT products page by page.
+        Starts a new cycle only when none is in progress so a slow catalog
+        walk is not reset before the last pages are imported.
         """
-        ICP = self.env["ir.config_parameter"].sudo()
-        now_str = fields.Datetime.to_string(fields.Datetime.now())
-        ICP.set_param(ELIT_NEW_PRODUCTS_REQUESTED_DATE_KEY, now_str)
-        ICP.set_param(ELIT_NEW_PRODUCTS_OFFSET_KEY, str(ELIT_API_OFFSET_START))
-        try:
-            self.env.ref(CRON_ELIT_NEW_PRODUCTS_BATCH_XML_ID).sudo().write(
-                {"active": True}
-            )
-            _logger.info(
-                "ELIT new products sync: trigger set cycle start=%s, "
-                "batch cron activated.",
-                now_str,
-            )
-        except Exception as e:
-            _logger.warning(
-                "ELIT new products sync: could not activate batch cron: %s", e,
-            )
+        self._elit_request_sync_cycle(
+            ELIT_NEW_PRODUCTS_REQUESTED_DATE_KEY,
+            ELIT_NEW_PRODUCTS_OFFSET_KEY,
+            CRON_ELIT_NEW_PRODUCTS_BATCH_XML_ID,
+            "new products",
+        )
 
     @api.model
     def _cron_elit_new_products_batch(self):

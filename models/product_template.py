@@ -448,20 +448,13 @@ class ProductTemplate(models.Model):
 
         _logger.info("ELIT price/stock batch: offset=%d, received=%d products.", api_offset, page_size)
 
-        api_codes = [
-            prod.get("codigo_alfa") or prod.get("codigo_producto")
-            for prod in api_products
-        ]
-        api_codes = [c for c in api_codes if c]
-        if api_codes:
-            products = self.search([
-                ("elit_product_code", "in", api_codes),
-            ])
-            code_to_product = {
-                p.elit_product_code: p for p in products if p.elit_product_code
-            }
-        else:
-            code_to_product = {}
+        api_codes = []
+        for prod in api_products:
+            for key in ("codigo_alfa", "codigo_producto"):
+                code = prod.get(key)
+                if code and code not in api_codes:
+                    api_codes.append(code)
+        code_to_product = Processor._elit_map_templates_by_api_codes(api_codes)
 
         updated = 0
         created = 0
@@ -470,18 +463,28 @@ class ProductTemplate(models.Model):
         missing_prods = []
 
         for prod in api_products:
-            codigo = prod.get("codigo_alfa") or prod.get("codigo_producto")
-            if not codigo:
+            codigo_alfa = prod.get("codigo_alfa") or prod.get("codigo_producto")
+            codigo_prod = prod.get("codigo_producto")
+            tmpl = code_to_product.get(codigo_alfa) or (
+                code_to_product.get(codigo_prod) if codigo_prod else False
+            )
+            if not codigo_alfa:
                 continue
-            if codigo not in code_to_product:
+            if not tmpl:
                 missing_prods.append(prod)
                 continue
             try:
-                self._apply_elit_data_to_product(code_to_product[codigo], prod, cotizacion)
-                products_to_update_cost |= code_to_product[codigo]
+                if tmpl.elit_product_code != codigo_alfa:
+                    tmpl.write({"elit_product_code": codigo_alfa})
+                self._apply_elit_data_to_product(tmpl, prod, cotizacion)
+                products_to_update_cost |= tmpl
                 updated += 1
             except Exception as e:
-                _logger.error("ELIT price/stock batch: error updating %s: %s", codigo, e)
+                _logger.error(
+                    "ELIT price/stock batch: error updating %s: %s",
+                    codigo_alfa,
+                    e,
+                )
                 errors += 1
 
         # Create products present in the API page but missing in Odoo (unified sync).

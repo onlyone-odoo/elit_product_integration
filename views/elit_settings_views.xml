@@ -5,62 +5,152 @@
         <field name="model">res.config.settings</field>
         <field name="inherit_id" ref="stock.res_config_settings_view_form"/>
         <field name="arch" type="xml">
-
             <xpath expr="//block[@id='production_lot_info']" position="after">
-                <group string="Integración ELIT" col="4">
-                    <group string="Credenciales API">
-                        <field name="elit_user_id"/>
-                        <field name="elit_token" password="True"/>
-                    </group>
-                    <group string="Conexión">
-                        <field name="elit_api_url"/>
-                        <field name="elit_endpoint"/>
-                    </group>
-                    <group string="Configuración">
-                        <field name="elit_public_categ_parent_id" placeholder="Ej: Computación"/>
-                        <field name="elit_partner_id" domain="[('supplier_rank', '>', 0)]"/>
-                        <field name="elit_company_id" options="{'no_create': True}"/>
-                    </group>
-                    <group string="Estado API">
-                        <field name="elit_api_notify_user_id"/>
-                        <div colspan="2">
-                            <span class="text-success fw-bold" invisible="elit_api_status != 'ok'">&#9679; API OK</span>
-                            <span class="text-danger fw-bold" invisible="elit_api_status != 'error'">&#9679; API Error</span>
-                            <span class="text-muted" invisible="elit_api_status != 'unknown'">&#9679; Sin verificar</span>
-                            <field name="elit_api_status" invisible="1"/>
+                <block title="Integración ELIT" name="elit_integration_settings">
+                    <setting
+                        id="elit_credentials"
+                        string="Credenciales y conexión"
+                        help="User ID y token del portal clientes.elit.com.ar."
+                    >
+                        <div class="content-group">
+                            <div class="row mt16">
+                                <label for="elit_user_id" class="col-lg-4 o_light_label"/>
+                                <field name="elit_user_id" class="col-lg-8"/>
+                            </div>
+                            <div class="row">
+                                <label for="elit_token" class="col-lg-4 o_light_label"/>
+                                <field name="elit_token" password="True" class="col-lg-8"/>
+                            </div>
+                            <div class="row">
+                                <label for="elit_api_url" class="col-lg-4 o_light_label"/>
+                                <field name="elit_api_url" class="col-lg-8"/>
+                            </div>
+                            <div class="row">
+                                <label for="elit_endpoint" class="col-lg-4 o_light_label"/>
+                                <field name="elit_endpoint" class="col-lg-8"/>
+                            </div>
                         </div>
-                        <field name="elit_api_last_check" readonly="1"/>
-                        <field name="elit_api_last_error" readonly="1" invisible="elit_api_status != 'error'"/>
-                    </group>
-                    <group string="Sincronizaciones">
-                        <div class="text-muted">
-                            Última completa:
-                            <field name="elit_last_full_sync" readonly="1" placeholder="Nunca"/>
-                            <br/>
-                            Última incremental:
-                            <field name="elit_last_incremental_sync" readonly="1" placeholder="Nunca"/>
-                            <br/>
-                            Último offset (full):
-                            <field name="elit_full_offset" readonly="1" placeholder="0"/>
-                            <br/>
-                            Último offset (incremental):
-                            <field name="elit_incremental_offset" readonly="1" placeholder="0"/>
-                            <br/>
-                            Último offset (update stock):
-                            <field name="elit_update_stock_offset" readonly="1" placeholder="0"/>
-                            <br/>
-                            Última sync productos nuevos completada:
-                            <field name="elit_new_products_last_done" readonly="1" placeholder="Nunca"/>
-                            <br/>
-                            Última sync precio/stock completada:
-                            <field name="elit_price_stock_last_done" readonly="1" placeholder="Nunca"/>
+                    </setting>
+                    <setting
+                        id="elit_configuration"
+                        string="Configuración"
+                        help="Proveedor, compañía y categoría ecommerce para los productos importados."
+                    >
+                        <div class="content-group">
+                            <div class="row mt16">
+                                <label for="elit_public_categ_parent_id" class="col-lg-4 o_light_label"/>
+                                <field name="elit_public_categ_parent_id" class="col-lg-8" placeholder="Ej: Computación"/>
+                            </div>
+                            <div class="row">
+                                <label for="elit_partner_id" class="col-lg-4 o_light_label"/>
+                                <field name="elit_partner_id" class="col-lg-8" domain="[('supplier_rank', '&gt;', 0)]"/>
+                            </div>
+                            <div class="row">
+                                <label for="elit_company_id" class="col-lg-4 o_light_label"/>
+                                <field name="elit_company_id" class="col-lg-8" options="{'no_create': True}"/>
+                            </div>
+                            <div class="row">
+                                <label for="elit_api_notify_user_id" class="col-lg-4 o_light_label"/>
+                                <field name="elit_api_notify_user_id" class="col-lg-8"/>
+                            </div>
                         </div>
-                        <div colspan="2" invisible="not elit_sync_stale_info">
-                            <span class="text-danger fw-bold">&#9679; Sync vencida:</span>
-                            <field name="elit_sync_stale_info" readonly="1"/>
+                    </setting>
+                    <setting
+                        id="elit_api_status"
+                        string="Estado API"
+                        help="Health check horario. API OK no implica que el catálogo haya terminado de sincronizarse."
+                    >
+                        <div class="content-group">
+                            <div class="mt-2">
+                                <span class="text-success fw-bold" invisible="elit_api_status != 'ok'">&#9679; API OK</span>
+                                <span class="text-danger fw-bold" invisible="elit_api_status != 'error'">&#9679; API Error</span>
+                                <span class="text-muted" invisible="elit_api_status != 'unknown'">&#9679; Sin verificar</span>
+                                <field name="elit_api_status" invisible="1"/>
+                            </div>
+                            <div class="row mt16">
+                                <label for="elit_api_last_check" class="col-lg-4 o_light_label"/>
+                                <field name="elit_api_last_check" class="col-lg-8" readonly="1"/>
+                            </div>
+                            <div class="row" invisible="elit_api_status != 'error'">
+                                <label for="elit_api_last_error" class="col-lg-4 o_light_label"/>
+                                <field name="elit_api_last_error" class="col-lg-8" readonly="1"/>
+                            </div>
                         </div>
-                    </group>
-                </group>
+                    </setting>
+                    <setting
+                        id="elit_sync_status"
+                        string="Sincronizaciones por lotes"
+                        help="Vencida significa que un ciclo no terminó a tiempo. El botón activa el mismo trigger que la acción planificada; los lotes siguen corriendo cada 5 minutos."
+                    >
+                        <div class="content-group">
+                            <div class="row mt16">
+                                <label for="elit_new_products_last_done" class="col-lg-4 o_light_label"/>
+                                <field name="elit_new_products_last_done" class="col-lg-8" readonly="1" placeholder="Nunca"/>
+                            </div>
+                            <div class="row">
+                                <label for="elit_price_stock_last_done" class="col-lg-4 o_light_label"/>
+                                <field name="elit_price_stock_last_done" class="col-lg-8" readonly="1" placeholder="Nunca"/>
+                            </div>
+                            <div class="row">
+                                <label for="elit_update_stock_offset" class="col-lg-4 o_light_label"/>
+                                <field name="elit_update_stock_offset" class="col-lg-8" readonly="1" placeholder="0"/>
+                            </div>
+                            <div class="mt-2 text-danger fw-bold" invisible="not elit_sync_stale_info">
+                                <span>&#9679; Sync vencida:</span>
+                                <field name="elit_sync_stale_info" readonly="1" class="oe_inline"/>
+                            </div>
+                            <div class="mt-3">
+                                <button
+                                    name="action_elit_request_price_stock_sync"
+                                    type="object"
+                                    string="Activar sync precio y stock"
+                                    class="btn-link"
+                                    icon="oi-arrow-right"
+                                />
+                                <br/>
+                                <button
+                                    name="action_elit_request_new_products_sync"
+                                    type="object"
+                                    string="Activar sync productos nuevos"
+                                    class="btn-link"
+                                    icon="oi-arrow-right"
+                                />
+                                <br/>
+                                <button
+                                    name="%(elit_product_integration.action_elit_sync_wizard)d"
+                                    type="action"
+                                    string="Asistente de sincronización"
+                                    class="btn-link"
+                                    icon="oi-arrow-right"
+                                />
+                            </div>
+                        </div>
+                    </setting>
+                    <setting
+                        id="elit_sync_legacy"
+                        string="Offsets legacy"
+                        help="Residuos del sync monolítico antiguo. No hace falta tocarlos; el sync actual usa lotes (precio/stock y productos nuevos)."
+                    >
+                        <div class="content-group">
+                            <div class="row mt16">
+                                <label for="elit_last_full_sync" class="col-lg-4 o_light_label"/>
+                                <field name="elit_last_full_sync" class="col-lg-8" readonly="1" placeholder="Nunca"/>
+                            </div>
+                            <div class="row">
+                                <label for="elit_last_incremental_sync" class="col-lg-4 o_light_label"/>
+                                <field name="elit_last_incremental_sync" class="col-lg-8" readonly="1" placeholder="Nunca"/>
+                            </div>
+                            <div class="row">
+                                <label for="elit_full_offset" class="col-lg-4 o_light_label"/>
+                                <field name="elit_full_offset" class="col-lg-8" readonly="1" placeholder="0"/>
+                            </div>
+                            <div class="row">
+                                <label for="elit_incremental_offset" class="col-lg-4 o_light_label"/>
+                                <field name="elit_incremental_offset" class="col-lg-8" readonly="1" placeholder="0"/>
+                            </div>
+                        </div>
+                    </setting>
+                </block>
             </xpath>
         </field>
     </record>
