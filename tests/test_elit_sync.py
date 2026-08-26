@@ -1,14 +1,8 @@
 # Copyright 2026 Be OnlyOne
 # License AGPL-3.0 or later (https://www.gnu.org/licenses/agpl).
 
-from odoo import fields
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
-
-from odoo.addons.elit_product_integration.models.sync_processor import (
-    ELIT_NEW_PRODUCTS_OFFSET_KEY,
-    ELIT_NEW_PRODUCTS_REQUESTED_DATE_KEY,
-)
 
 
 @tagged("post_install", "-at_install")
@@ -59,12 +53,11 @@ class TestElitSync(TransactionCase):
         self.assertTrue(self.processor._elit_pagination_done({}, 0, 100, 0))
         self.assertTrue(self.processor._elit_pagination_done({}, 0, 100, 40))
 
-    def test_trigger_does_not_reset_offset_when_cycle_active(self):
-        ICP = self.env["ir.config_parameter"].sudo()
-        ICP.set_param(
-            ELIT_NEW_PRODUCTS_REQUESTED_DATE_KEY,
-            fields.Datetime.to_string(fields.Datetime.now()),
-        )
-        ICP.set_param(ELIT_NEW_PRODUCTS_OFFSET_KEY, "500")
+    def test_legacy_trigger_alias_does_not_reset_catalog_run(self):
+        """Old new-products trigger now resumes the unified catalog cycle."""
+        Run = self.env["elit.catalog.run"]
+        run = Run.create({"state": "ingest", "offset": 500})
         self.processor._action_request_elit_new_products_sync()
-        self.assertEqual(ICP.get_param(ELIT_NEW_PRODUCTS_OFFSET_KEY), "500")
+        self.assertEqual(run.offset, 500)
+        self.assertEqual(run.state, "ingest")
+        self.assertEqual(Run.search_count([("state", "=", "ingest")]), 1)

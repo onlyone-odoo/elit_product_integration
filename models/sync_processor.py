@@ -21,6 +21,14 @@ ELIT_NEW_PRODUCTS_REQUESTED_DATE_KEY = "elit.new_products_sync_requested_date"
 ELIT_NEW_PRODUCTS_DEACTIVATE_PENDING_KEY = "elit.new_products_sync_deactivate_pending"
 CRON_ELIT_NEW_PRODUCTS_BATCH_XML_ID = "elit_product_integration.cron_elit_new_products_batch"
 
+ELIT_CATALOG_INGEST_DEACTIVATE_PENDING_KEY = "elit.catalog_ingest_deactivate_pending"
+ELIT_CATALOG_APPLY_DEACTIVATE_PENDING_KEY = "elit.catalog_apply_deactivate_pending"
+CRON_ELIT_CATALOG_INGEST_XML_ID = "elit_product_integration.cron_elit_catalog_ingest_batch"
+CRON_ELIT_CATALOG_APPLY_XML_ID = "elit_product_integration.cron_elit_catalog_apply_batch"
+ELIT_CATALOG_LAST_DONE_KEY = "elit.catalog_last_done"
+ELIT_CATALOG_STALE_HOURS_KEY = "elit.catalog_stale_hours"
+ELIT_CATALOG_STALE_HOURS_DEFAULT = 14  # 6h trigger + margin
+
 # ELIT API pagination is 0-based (see paginador.offset in official docs).
 ELIT_API_OFFSET_START = 0
 
@@ -94,6 +102,59 @@ class ElitSyncProcessor(models.AbstractModel):
         if extra:
             params.update(extra)
         return params
+
+    @api.model
+    def _elit_ingest_page_complete(self, page_size, limit=100):
+        """Return True when an ingest API page is the last one.
+
+        Uses only page length (empty or short page). ``paginador.total`` is
+        not trusted: ELIT often returns total equal to the page size.
+        """
+        return page_size <= 0 or page_size < int(limit)
+
+    @api.model
+    def _elit_fetch_productos_page(self, offset, limit=100):
+        """POST one /productos page. Return the JSON dict or None on error."""
+        ICP = self.env["ir.config_parameter"].sudo()
+        get_param = ICP.get_param
+        user_id_str = get_param("elit.user_id")
+        token = get_param("elit.token")
+        api_url = get_param("elit.api_url", "https://clientes.elit.com.ar").rstrip("/")
+        endpoint = get_param("elit.endpoint", "/v1/api/productos")
+        if "api.elit.com.ar" in api_url:
+            api_url = "https://clientes.elit.com.ar"
+        if not user_id_str or not token:
+            _logger.warning("ELIT fetch page: missing credentials.")
+            return None
+        try:
+            response = requests.post(
+                f"{api_url}{endpoint}",
+                params=self._elit_list_query_params(limit, offset),
+                json={"user_id": int(user_id_str), "token": token},
+                headers={"Content-Type": "application/json"},
+                timeout=30,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except Exception as e:
+            _logger.error(
+                "ELIT fetch page error (offset %d): %s",
+                offset,
+                self._elit_http_error_detail(e),
+            )
+            return None
+        if not isinstance(data, dict):
+            _logger.error(
+                "ELIT fetch page: unexpected payload type %s (offset=%s)",
+                type(data).__name__,
+                offset,
+            )
+            return None
+        shape_error = self._elit_validate_api_payload(data)
+        if shape_error:
+            _logger.error("ELIT fetch page: %s", shape_error)
+            return None
+        return data
 
     @api.model
     def _elit_normalize_vendor_code(self, codigo):
@@ -1013,8 +1074,114 @@ class ElitSyncProcessor(models.AbstractModel):
         return stats
 
     # ------------------------------------------------------------------
-    # Trigger + batch + cleanup pattern (mirrors grupo_nucleo_integration)
+    # Catalog staging: ingest (1 API page) then apply (internal batch)
     # ------------------------------------------------------------------
+
+    @api.model
+    def _action_request_elit_catalog_sync(self):
+        """Start or resume a unified catalog cycle (ingest then apply).
+
+        Does not reset an in-progress run. Activates the ingest or apply
+        batch cron according to the run state.
+        """
+        Run = self.env["elit.catalog.run"]
+        run = Run._get_active_run()
+        if run and run.started_at:
+            age = fields.Datetime.now() - run.started_at
+            if age > timedelta(hours=ELIT_SYNC_MAX_CYCLE_HOURS):
+                run.write(
+                    {
+                        "state": "failed",
+                        "error_message": _(
+                            "Cycle exceeded %s hours; snapshot aborted."
+                        )
+                        % ELIT_SYNC_MAX_CYCLE_HOURS,
+                        "finished_at": fields.Datetime.now(),
+                    }
+                )
+                _logger.warning(
+                    "ELIT catalog: run %s exceeded %sh, marked failed.",
+                    run.id,
+                    ELIT_SYNC_MAX_CYCLE_HOURS,
+                )
+                run = Run.browse()
+        if run:
+            _logger.info(
+                "ELIT catalog: cycle already in progress run=%s state=%s offset=%s",
+                run.id,
+                run.state,
+                run.offset,
+            )
+            if run.state == "ingest":
+                self._elit_ensure_cron_active(CRON_ELIT_CATALOG_INGEST_XML_ID)
+            else:
+                self._elit_ensure_cron_active(CRON_ELIT_CATALOG_APPLY_XML_ID)
+            return run
+        run = Run.create({"state": "ingest", "offset": ELIT_API_OFFSET_START})
+        self._elit_ensure_cron_active(CRON_ELIT_CATALOG_INGEST_XML_ID)
+        _logger.info("ELIT catalog: started ingest run=%s", run.id)
+        return run
+
+    @api.model
+    def _cron_elit_catalog_ingest_batch(self):
+        """One API page into staging. Activate apply when ingest is complete."""
+        Run = self.env["elit.catalog.run"]
+        run = Run.search([("state", "=", "ingest")], limit=1, order="id desc")
+        if not run:
+            return
+        ICP = self.env["ir.config_parameter"].sudo()
+        result = run.action_ingest_one_page()
+        self.env.cr.commit()
+        if result.get("failed"):
+            ICP.set_param(ELIT_CATALOG_INGEST_DEACTIVATE_PENDING_KEY, "1")
+            self.env.cr.commit()
+            return
+        if result.get("done"):
+            ICP.set_param(ELIT_CATALOG_INGEST_DEACTIVATE_PENDING_KEY, "1")
+            self._elit_ensure_cron_active(CRON_ELIT_CATALOG_APPLY_XML_ID)
+            self.env.cr.commit()
+            _logger.info(
+                "ELIT catalog ingest complete run=%s; apply batch activated.",
+                run.id,
+            )
+
+    @api.model
+    def _cron_elit_catalog_apply_batch(self):
+        """Apply one internal staging batch (no API). Zero missing stock at end."""
+        Run = self.env["elit.catalog.run"]
+        run = Run.search(
+            [("state", "in", ("ready", "apply"))],
+            limit=1,
+            order="id desc",
+        )
+        if not run:
+            return
+        ICP = self.env["ir.config_parameter"].sudo()
+        result = run.action_apply_one_batch()
+        self.env.cr.commit()
+        if result.get("done"):
+            ICP.set_param(ELIT_CATALOG_APPLY_DEACTIVATE_PENDING_KEY, "1")
+            ICP.set_param(
+                ELIT_CATALOG_LAST_DONE_KEY,
+                fields.Datetime.to_string(fields.Datetime.now()),
+            )
+            self.env.cr.commit()
+            _logger.info("ELIT catalog apply complete run=%s.", run.id)
+
+    @api.model
+    def _action_request_elit_price_stock_sync(self):
+        """Backward-compatible alias: unified catalog cycle."""
+        self._action_request_elit_catalog_sync()
+
+    @api.model
+    def _action_request_elit_new_products_sync(self):
+        """Backward-compatible alias: unified catalog cycle."""
+        self._action_request_elit_catalog_sync()
+
+    # ------------------------------------------------------------------
+    # Trigger + batch + cleanup pattern (legacy batch methods kept inactive)
+    # ------------------------------------------------------------------
+
 
     @api.model
     def _elit_sync_cycle_active(self, ICP, requested_key, offset_key, default_offset=None):
@@ -1053,20 +1220,6 @@ class ElitSyncProcessor(models.AbstractModel):
             ICP.set_param(offset_key, default_offset)
             return False
         return True
-
-    @api.model
-    def _action_request_elit_price_stock_sync(self):
-        """Called by trigger cron (e.g. every 6h).
-
-        Starts a new cycle only when none is in progress. Resetting the offset
-        on every trigger aborted catalogs larger than one 6h window.
-        """
-        self._elit_request_sync_cycle(
-            ELIT_PRICE_STOCK_REQUESTED_DATE_KEY,
-            ELIT_PRICE_STOCK_OFFSET_KEY,
-            CRON_ELIT_PRICE_STOCK_BATCH_XML_ID,
-            "price/stock",
-        )
 
     @api.model
     def _cron_elit_price_stock_batch(self):
@@ -1163,26 +1316,28 @@ class ElitSyncProcessor(models.AbstractModel):
             ICP.set_param(ELIT_NEW_PRODUCTS_DEACTIVATE_PENDING_KEY, "")
             changed = True
 
+        if (ICP.get_param(ELIT_CATALOG_INGEST_DEACTIVATE_PENDING_KEY) or "").strip() == "1":
+            self._deactivate_cron_if_found(
+                CRON_ELIT_CATALOG_INGEST_XML_ID,
+                "model._cron_elit_catalog_ingest_batch()",
+            )
+            ICP.set_param(ELIT_CATALOG_INGEST_DEACTIVATE_PENDING_KEY, "")
+            changed = True
+
+        if (ICP.get_param(ELIT_CATALOG_APPLY_DEACTIVATE_PENDING_KEY) or "").strip() == "1":
+            self._deactivate_cron_if_found(
+                CRON_ELIT_CATALOG_APPLY_XML_ID,
+                "model._cron_elit_catalog_apply_batch()",
+            )
+            ICP.set_param(ELIT_CATALOG_APPLY_DEACTIVATE_PENDING_KEY, "")
+            changed = True
+
         if changed:
             self.env.cr.commit()
 
     # ------------------------------------------------------------------
     # Trigger + batch for NEW products (mirrors price/stock pattern)
     # ------------------------------------------------------------------
-
-    @api.model
-    def _action_request_elit_new_products_sync(self):
-        """Called by trigger cron (e.g. every 24h).
-
-        Starts a new cycle only when none is in progress so a slow catalog
-        walk is not reset before the last pages are imported.
-        """
-        self._elit_request_sync_cycle(
-            ELIT_NEW_PRODUCTS_REQUESTED_DATE_KEY,
-            ELIT_NEW_PRODUCTS_OFFSET_KEY,
-            CRON_ELIT_NEW_PRODUCTS_BATCH_XML_ID,
-            "new products",
-        )
 
     @api.model
     def _cron_elit_new_products_batch(self):
@@ -1308,16 +1463,10 @@ class ElitSyncProcessor(models.AbstractModel):
         now = fields.Datetime.now()
         checks = [
             (
-                _("Productos nuevos ELIT"),
-                ELIT_NEW_PRODUCTS_LAST_DONE_KEY,
-                ELIT_NEW_PRODUCTS_STALE_HOURS_KEY,
-                ELIT_NEW_PRODUCTS_STALE_HOURS_DEFAULT,
-            ),
-            (
-                _("Precio/stock ELIT"),
-                ELIT_PRICE_STOCK_LAST_DONE_KEY,
-                ELIT_PRICE_STOCK_STALE_HOURS_KEY,
-                ELIT_PRICE_STOCK_STALE_HOURS_DEFAULT,
+                _("Catálogo ELIT"),
+                ELIT_CATALOG_LAST_DONE_KEY,
+                ELIT_CATALOG_STALE_HOURS_KEY,
+                ELIT_CATALOG_STALE_HOURS_DEFAULT,
             ),
         ]
         stale = []

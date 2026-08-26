@@ -1,6 +1,6 @@
 {
     "name": "ELIT Product Integration",
-    "version": "17.0.14.0.0",
+    "version": "17.0.15.0.0",
     "category": "Inventory/Purchase",
     "summary": "Importación y sincronización de productos desde API ELIT",
     "description": """
@@ -24,6 +24,7 @@
         "security/ir.model.access.csv",
         "views/elit_settings_views.xml",
         "views/product_template_views.xml",
+        "views/elit_catalog_views.xml",
         "views/sync_wizard_views.xml",
         "data/cron.xml",
         "data/actions.xml",

@@ -8,8 +8,9 @@
                 <group>
                     <field name="sync_type"/>
                     <div colspan="2" class="text-muted">
-                        Activa los crons de lotes (1 página API por ejecución).
-                        No lanza un loop completo en esta petición HTTP.
+                        Un solo ciclo: ingest (1 página API por lote) y apply
+                        interno. Los productos que ELIT deja de publicar
+                        quedan con stock ELIT 0 al cerrar el snapshot.
                     </div>
                     <field name="date_from" invisible="1"/>
                     <field name="offset_start" invisible="1"/>

@@ -1,3 +1,15 @@
+`17.0.15.0.0`
+-------------
+
+- Unified catalog staging: ingest one API page per tick into ``elit.catalog.run``
+  / ``elit.catalog.line``, then apply internally (no API). SKUs omitted from a
+  **complete** snapshot get ``stock_elit=0`` (not archived) and cost is
+  recalculated so dual-vendor glue can switch to Grupo Núcleo when it has stock.
+- Empty first API page or incomplete ingest never zeroes stock.
+- Ingest end is a short/empty page; ``paginador.total`` is not trusted.
+- Legacy new-products / price-stock crons stay inactive (aliases of the
+  catalog trigger). Full-loop methods remain manual.
+
 `17.0.14.0.0`
 -------------
 

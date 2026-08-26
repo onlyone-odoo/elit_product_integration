@@ -1,2 +1,4 @@
 id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
 access_elit_sync_wizard,elit.sync.wizard.access,model_elit_sync_wizard,base.group_user,1,0,1,0
+access_elit_catalog_run,elit.catalog.run,model_elit_catalog_run,base.group_system,1,1,1,1
+access_elit_catalog_line,elit.catalog.line,model_elit_catalog_line,base.group_system,1,1,1,1

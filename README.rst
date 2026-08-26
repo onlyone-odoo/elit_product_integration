@@ -17,14 +17,14 @@ ELIT Product Integration
 Este módulo permite la **importación y sincronización automática de productos desde la API de ELIT** hacia Odoo.
 
 Funcionalidades principales:
-- **Importar productos nuevos** y **actualizar stock y precio** de existentes con sincronización por lotes (trigger + batch + cleanup): una página API por ejecución para evitar timeouts.
+- **Catálogo unificado (staging)**: ingest de **una página API** por ejecución hacia modelos auxiliares (``elit.catalog.run`` / ``elit.catalog.line``) y apply interno por lotes (sin API). Evita timeouts y permite detectar SKUs que ELIT deja de publicar.
 - El precio del proveedor se guarda en **product.supplierinfo**; el módulo setea ``replenishment_cost_type = "supplier_price"`` y llama ``_update_cost_from_replenishment_cost()`` por batch (dependencia **product_replenishment_cost** OCA), para que el costo contable y las listas de precios basadas en costos se mantengan actualizados.
 - Creación automática de categorías y subcategorías (internas y de ecommerce).
 - Descarga de imágenes en lote mediante cron.
 - Configuración automática de rutas **Buy** + **MTO** (al vender se genera orden de compra al proveedor).
-- Campo ``stock_elit`` con stock total del proveedor.
+- Campo ``stock_elit`` con stock total del proveedor. Si un SKU **no aparece** en un snapshot completo, se pone ``stock_elit=0`` (no se archiva) y se recalcula el costo para el glue dual-vendor con Grupo Núcleo.
 - Partner "ELIT" creado automáticamente; configurable en Ajustes.
-- Wizard manual para sincronización completa o desde un offset.
+- Wizard manual para activar el ciclo de catálogo (ingest + apply).
 
 Ideal para revendedores que hacen dropshipping o compra bajo demanda con ELIT.
 
@@ -76,17 +76,17 @@ Tras instalar/actualizar el módulo, en **Ajustes** → **Técnico** → **Autom
 +------------------------------------------+------------------+------------------------------------------------------------------+
 | Nombre                                   | Frecuencia       | Descripción                                                      |
 +==========================================+==================+==================================================================+
-| ELIT: Importar Productos Nuevos         | 1 vez por día    | Trae solo productos que aún no existen en Odoo. No modifica      |
-|                                          |                  | existentes.                                                      |
+| ELIT: Activar sync de catálogo (staging) | Cada 6 horas     | Trigger: crea o reanuda una corrida ``elit.catalog.run``.        |
 +------------------------------------------+------------------+------------------------------------------------------------------+
-| ELIT: Activar sync precio y stock        | Cada 6 horas     | Trigger: marca "sync solicitado hoy" y activa el cron de lotes.  |
+| ELIT: Lotes ingest catálogo              | Cada 5 min       | 1 página API (~100 SKUs) hacia líneas de staging. Página vacía   |
+|                                          | (inactivo por     | o corta cierra el ingest. Error HTTP no avanza offset.          |
+|                                          | defecto)         |                                                                  |
 +------------------------------------------+------------------+------------------------------------------------------------------+
-| ELIT: Lotes de sync precio y stock       | Cada 5 min       | Corre solo cuando el trigger lo activó. Una página API (~100     |
-|                                          | (inactivo por     | productos) por ejecución; actualiza supplierinfo, stock_elit,    |
-|                                          | defecto)         | replenishment_cost_type y recalcula costo. Al terminar se       |
-|                                          |                  | desactiva vía cron de cleanup.                                   |
+| ELIT: Lotes apply catálogo               | Cada 5 min       | Apply interno (~80 líneas). Al terminar, SKUs ELIT ausentes del  |
+|                                          | (inactivo por     | snapshot quedan con ``stock_elit=0`` (no se archivan) y se      |
+|                                          | defecto)         | recalcula el costo.                                              |
 +------------------------------------------+------------------+------------------------------------------------------------------+
-| ELIT: Desactivar cron de lotes si        | Cada 10 min      | Si el batch terminó, desactiva el cron de lotes (evita lock).    |
+| ELIT: Desactivar crons de lotes si       | Cada 10 min      | Si ingest/apply terminó, desactiva esos crons (evita lock).      |
 | corresponde                               |                  |                                                                  |
 +------------------------------------------+------------------+------------------------------------------------------------------+
 | ELIT: Health check API                   | Cada 1 hora      | Verifica si la API responde; indicador en Ajustes y notificación |
@@ -94,26 +94,27 @@ Tras instalar/actualizar el módulo, en **Ajustes** → **Técnico** → **Autom
 |                                          |                  | a error).                                                         |
 +------------------------------------------+------------------+------------------------------------------------------------------+
 | ELIT: Publicar productos con stock       | Cada 1 hora      | Publica en web productos ELIT con stock_elit > 5 y despublica   |
-|                                          |                  | los que tienen stock_elit = 0.                                    |
+|                                          |                  | los que tienen stock_elit = 0. Con glue dual-vendor (ELIT+GN)    |
+|                                          |                  | este cron original se desactiva si no está customizado.          |
 +------------------------------------------+------------------+------------------------------------------------------------------+
 | ELIT: Descargar imágenes (batch)         | Cada 2 horas      | Descarga en lote las imágenes pendientes (campo URL ELIT).       |
 +------------------------------------------+------------------+------------------------------------------------------------------+
-| ELIT: Actualizar Stock y Costo LEGACY    | Desactivado      | Full loop en una ejecución; disponible como acción de servidor  |
-| (full loop)                              |                  | si se necesita un sync completo manual.                           |
+| ELIT: crons legacy (nuevos / precio)     | Desactivado      | Reemplazados por el ciclo de catálogo. El trigger alias arranca  |
+|                                          |                  | el mismo staging. Full loop sigue como acción de servidor.       |
 +------------------------------------------+------------------+------------------------------------------------------------------+
 
 Resumen del flujo recomendado
 -----------------------------
-- **Productos nuevos**: el cron "Importar Productos Nuevos" los crea (1x día).
-- **Stock y precio de productos ya existentes**: el trigger "Activar sync precio y stock" (cada 6 h) activa el cron de lotes; este corre cada 5 min procesando una página de ~100 productos por vez hasta completar el ciclo; luego el cron "Desactivar cron de lotes si corresponde" lo desactiva. Sin timeouts y con costo de reposición actualizado por batch.
+- **Catálogo**: el trigger cada 6 h arranca ingest (1 página API por lote) y luego apply interno. Al cerrar un snapshot **completo**, los productos ELIT que la API ya no lista quedan con ``stock_elit=0``. Dual-vendor: el módulo glue ``product_cost_vendor_in_stock`` pasa costo/MTO a Grupo Núcleo si ``stock_gn > 0``.
+- Primera página API vacía o ingest incompleto: **no** se pone stock en 0 (evita un falso catálogo vacío).
 - **Estado de la API**: el cron "Health check API" (cada 1 h) actualiza el indicador en Ajustes y notifica por Discuss si la API falla.
 
 Acciones manuales desde la lista de productos
 ----------------------------------------------
-- **ELIT: Actualizar Stock (individual)**: para pocos productos; 1 llamada API por producto.
-- **ELIT: Actualizar Stock BATCH (eficiente)**: para muchos productos seleccionados; usa la API en batch.
-- **ELIT: Actualizar TODOS los Stock (batch)**: actualiza todos los productos ELIT (mismo criterio que el cron).
-- **ELIT: Importar Productos Nuevos**: lanza la importación de productos nuevos (mismo criterio que el cron).
+- **ELIT: Sincronizar desde API**: 1 producto → refresh individual; varios → batch.
+- **ELIT: Actualizar todo el catálogo (full loop)**: acción de servidor, no programada.
+- **ELIT: Importar productos nuevos (full loop manual)**: acción de servidor, no programada.
+- Inventario → **ELIT catalog runs**: auditoría de corridas y líneas de staging.
 
 Los productos importados
 ------------------------

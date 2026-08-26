@@ -5,34 +5,29 @@
     <delete model="ir.cron" id="cron_elit_incremental"/>
 
     <!--
-        Batched API sync pattern (see odoo-batched-api-sync skill):
-        Trigger (interval) → sets ICP + activates Batch cron
-        Batch (5 min, starts inactive) → ONE API page per run, advances offset
-        Cleanup (10 min, active) → deactivates Batch when finished (cron cannot
-        deactivate itself due to row lock).
-
-        Priority: Trigger < Batch < Cleanup (lower number = higher priority).
+        Unified catalog staging (odoo-batched-api-sync):
+        Trigger → ingest batch (1 API page) → apply batch (internal, no API)
+        Cleanup deactivates ingest/apply (cron cannot deactivate itself).
     -->
 
-    <!-- === New products: trigger + batch (cleanup shared below) === -->
-    <record id="cron_elit_new_products" model="ir.cron">
-        <field name="name">ELIT: Activar importación de productos nuevos</field>
-        <field name="interval_number">1</field>
-        <field name="interval_type">days</field>
+    <record id="cron_elit_catalog_trigger" model="ir.cron">
+        <field name="name">ELIT: Activar sync de catálogo (staging)</field>
+        <field name="interval_number">6</field>
+        <field name="interval_type">hours</field>
         <field name="model_id" ref="model_elit_sync_processor"/>
         <field name="state">code</field>
-        <field name="code">model._action_request_elit_new_products_sync()</field>
+        <field name="code">model._action_request_elit_catalog_sync()</field>
         <field name="numbercall">-1</field>
         <field name="user_id" ref="base.user_root"/>
         <field name="active" eval="True"/>
         <field name="priority">5</field>
     </record>
 
-    <record id="cron_elit_new_products_batch" model="ir.cron">
-        <field name="name">ELIT: Lotes de importación productos nuevos</field>
+    <record id="cron_elit_catalog_ingest_batch" model="ir.cron">
+        <field name="name">ELIT: Lotes ingest catálogo (1 página API)</field>
         <field name="model_id" ref="model_elit_sync_processor"/>
         <field name="state">code</field>
-        <field name="code">model._cron_elit_new_products_batch()</field>
+        <field name="code">model._cron_elit_catalog_ingest_batch()</field>
         <field name="interval_number">5</field>
         <field name="interval_type">minutes</field>
         <field name="numbercall">-1</field>
@@ -41,22 +36,61 @@
         <field name="priority">7</field>
     </record>
 
-    <!-- === Price / stock: trigger + batch === -->
-    <record id="cron_elit_price_stock_trigger" model="ir.cron">
-        <field name="name">ELIT: Activar sync precio y stock</field>
+    <record id="cron_elit_catalog_apply_batch" model="ir.cron">
+        <field name="name">ELIT: Lotes apply catálogo (interno)</field>
         <field name="model_id" ref="model_elit_sync_processor"/>
         <field name="state">code</field>
-        <field name="code">model._action_request_elit_price_stock_sync()</field>
-        <field name="interval_number">6</field>
-        <field name="interval_type">hours</field>
+        <field name="code">model._cron_elit_catalog_apply_batch()</field>
+        <field name="interval_number">5</field>
+        <field name="interval_type">minutes</field>
         <field name="numbercall">-1</field>
         <field name="user_id" ref="base.user_root"/>
-        <field name="active" eval="True"/>
+        <field name="active" eval="False"/>
         <field name="priority">8</field>
     </record>
 
+    <!-- Previous dual API walks: kept for rollback, inactive. -->
+    <record id="cron_elit_new_products" model="ir.cron">
+        <field name="name">ELIT: Activar importación de productos nuevos (legacy)</field>
+        <field name="interval_number">1</field>
+        <field name="interval_type">days</field>
+        <field name="model_id" ref="model_elit_sync_processor"/>
+        <field name="state">code</field>
+        <field name="code">model._action_request_elit_new_products_sync()</field>
+        <field name="numbercall">-1</field>
+        <field name="user_id" ref="base.user_root"/>
+        <field name="active" eval="False"/>
+        <field name="priority">15</field>
+    </record>
+
+    <record id="cron_elit_new_products_batch" model="ir.cron">
+        <field name="name">ELIT: Lotes de importación productos nuevos (legacy)</field>
+        <field name="model_id" ref="model_elit_sync_processor"/>
+        <field name="state">code</field>
+        <field name="code">model._cron_elit_new_products_batch()</field>
+        <field name="interval_number">5</field>
+        <field name="interval_type">minutes</field>
+        <field name="numbercall">-1</field>
+        <field name="user_id" ref="base.user_root"/>
+        <field name="active" eval="False"/>
+        <field name="priority">16</field>
+    </record>
+
+    <record id="cron_elit_price_stock_trigger" model="ir.cron">
+        <field name="name">ELIT: Activar sync precio y stock (legacy)</field>
+        <field name="interval_number">6</field>
+        <field name="interval_type">hours</field>
+        <field name="model_id" ref="model_elit_sync_processor"/>
+        <field name="state">code</field>
+        <field name="code">model._action_request_elit_price_stock_sync()</field>
+        <field name="numbercall">-1</field>
+        <field name="user_id" ref="base.user_root"/>
+        <field name="active" eval="False"/>
+        <field name="priority">17</field>
+    </record>
+
     <record id="cron_elit_price_stock_batch" model="ir.cron">
-        <field name="name">ELIT: Lotes de sync precio y stock</field>
+        <field name="name">ELIT: Lotes de sync precio y stock (legacy)</field>
         <field name="model_id" ref="model_elit_sync_processor"/>
         <field name="state">code</field>
         <field name="code">model._cron_elit_price_stock_batch()</field>
@@ -65,10 +99,9 @@
         <field name="numbercall">-1</field>
         <field name="user_id" ref="base.user_root"/>
         <field name="active" eval="False"/>
-        <field name="priority">10</field>
+        <field name="priority">18</field>
     </record>
 
-    <!-- === Shared cleanup for all batch crons that request deactivation === -->
     <record id="cron_elit_deactivate_batch_if_pending" model="ir.cron">
         <field name="name">ELIT: Desactivar crons de lotes si corresponde</field>
         <field name="model_id" ref="model_elit_sync_processor"/>
@@ -82,7 +115,6 @@
         <field name="priority">20</field>
     </record>
 
-    <!-- === Auxiliary (not trigger/batch; safe to run independently) === -->
     <record id="cron_elit_sync_images" model="ir.cron">
         <field name="name">ELIT: Descargar imágenes (batch)</field>
         <field name="interval_number">2</field>
@@ -98,7 +130,7 @@
 
     <record id="cron_auto_publish_elit" model="ir.cron">
         <field name="name">ELIT: Publicar productos con stock</field>
-        <field name="model_id" ref="model_product_template"/>
+        <field name="model_id" ref="product.model_product_template"/>
         <field name="state">code</field>
         <field name="code">
 # Publicar productos con stock > 5

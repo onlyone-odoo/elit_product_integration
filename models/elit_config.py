@@ -88,7 +88,11 @@ class ResConfigSettings(models.TransientModel):
         compute="_compute_elit_api_status",
     )
 
-    # Sync watchdog (last completed cycle per sync type)
+    # Sync watchdog (last completed catalog cycle)
+    elit_catalog_last_done = fields.Datetime(
+        string="Última sync catálogo ELIT completada",
+        compute="_compute_elit_sync_status",
+    )
     elit_new_products_last_done = fields.Datetime(
         string="Última sync productos nuevos completada",
         compute="_compute_elit_sync_status",
@@ -117,50 +121,48 @@ class ResConfigSettings(models.TransientModel):
     @api.depends("elit_user_id")
     def _compute_elit_sync_status(self):
         ICP = self.env["ir.config_parameter"].sudo()
+        catalog_last = ICP.get_param("elit.catalog_last_done", False)
         new_products_last = ICP.get_param("elit.new_products_last_done", False)
         price_stock_last = ICP.get_param("elit.price_stock_last_done", False)
         stale = self.env["elit.sync.processor"]._elit_get_stale_syncs(ICP)
         stale_info = ", ".join(label for label, _last in stale) if stale else False
         for rec in self:
+            rec.elit_catalog_last_done = catalog_last or False
             rec.elit_new_products_last_done = new_products_last or False
             rec.elit_price_stock_last_done = price_stock_last or False
             rec.elit_sync_stale_info = stale_info
 
-    def action_elit_request_price_stock_sync(self):
-        """Activate the price/stock batch cycle (same as the trigger cron)."""
+    def action_elit_request_catalog_sync(self):
+        """Activate the unified catalog ingest+apply cycle."""
         self.ensure_one()
-        self.env["elit.sync.processor"]._action_request_elit_price_stock_sync()
+        self.env["elit.sync.processor"]._action_request_elit_catalog_sync()
         return {
             "type": "ir.actions.client",
             "tag": "display_notification",
             "params": {
                 "title": _("ELIT"),
                 "message": _(
-                    "Sync precio/stock solicitado. Los lotes corren cada "
-                    "5 minutos hasta terminar el catálogo."
+                    "Sync de catálogo solicitado. Ingest (1 página API) y "
+                    "apply interno corren cada 5 minutos hasta terminar."
                 ),
                 "type": "success",
                 "sticky": False,
             },
         }
 
+    def action_elit_open_catalog_runs(self):
+        """Open the catalog run audit list."""
+        return self.env.ref(
+            "elit_product_integration.action_elit_catalog_run"
+        ).read()[0]
+
+    def action_elit_request_price_stock_sync(self):
+        """Activate the unified catalog cycle (legacy button name)."""
+        return self.action_elit_request_catalog_sync()
+
     def action_elit_request_new_products_sync(self):
-        """Activate the new-products batch cycle (same as the trigger cron)."""
-        self.ensure_one()
-        self.env["elit.sync.processor"]._action_request_elit_new_products_sync()
-        return {
-            "type": "ir.actions.client",
-            "tag": "display_notification",
-            "params": {
-                "title": _("ELIT"),
-                "message": _(
-                    "Sync de productos nuevos solicitado. Los lotes corren "
-                    "cada 5 minutos hasta terminar el catálogo."
-                ),
-                "type": "success",
-                "sticky": False,
-            },
-        }
+        """Activate the unified catalog cycle (legacy button name)."""
+        return self.action_elit_request_catalog_sync()
 
     def set_values(self):
         super().set_values()

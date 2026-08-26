@@ -8,18 +8,14 @@ class ElitSyncWizard(models.TransientModel):
     sync_type = fields.Selection(
         [
             (
-                "full",
-                "Catálogo completo (activa lotes: productos nuevos + precio/stock)",
-            ),
-            (
-                "incremental",
-                "Precio y stock (activa lote de actualización)",
+                "catalog",
+                "Catálogo (ingest 1 página API + apply interno)",
             ),
         ],
-        default="incremental",
+        default="catalog",
         required=True,
-        help="No ejecuta un loop monolítico: activa los crons de lotes "
-        "(una página API por ejecución) para evitar timeouts del worker.",
+        help="Activa el ciclo unificado: una página API por lote de ingest, "
+        "luego apply interno. No recorre todo el catálogo en esta petición.",
     )
     date_from = fields.Datetime(
         string="From Date (optional)",
@@ -27,26 +23,18 @@ class ElitSyncWizard(models.TransientModel):
     )
     offset_start = fields.Integer(
         string="Initial Offset (to resume)",
-        default=1,
+        default=0,
         help="Reservado para reanudación manual del modo legacy full-loop.",
     )
 
     def action_sync(self):
-        """Activate trigger+batch crons instead of a monolithic full-loop sync."""
-        processor = self.env["elit.sync.processor"]
-        if self.sync_type == "full":
-            processor._action_request_elit_new_products_sync()
-            processor._action_request_elit_price_stock_sync()
-            message = _(
-                "Sync ELIT catálogo completo solicitado: se activaron los lotes "
-                "de productos nuevos y de precio/stock. Seguí el progreso en los logs."
-            )
-        else:
-            processor._action_request_elit_price_stock_sync()
-            message = _(
-                "Sync ELIT precio/stock solicitado: se activó el cron de lotes. "
-                "Seguí el progreso en los logs."
-            )
+        """Activate the unified catalog ingest+apply crons."""
+        self.env["elit.sync.processor"]._action_request_elit_catalog_sync()
+        message = _(
+            "Sync ELIT catálogo solicitado: ingest (1 página API por lote) "
+            "y luego apply interno. Seguí el progreso en Inventario → "
+            "Ajustes o en ELIT catalog runs."
+        )
         self.env["bus.bus"]._sendone(
             self.env.user.partner_id,
             "simple_notification",
@@ -60,5 +48,5 @@ class ElitSyncWizard(models.TransientModel):
 
     @api.model
     def action_sync_incremental(self):
-        """Activate price/stock batch sync (safe for scheduled use)."""
-        self.env["elit.sync.processor"]._action_request_elit_price_stock_sync()
+        """Activate unified catalog cycle (safe for scheduled use)."""
+        self.env["elit.sync.processor"]._action_request_elit_catalog_sync()
