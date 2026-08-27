@@ -1,3 +1,11 @@
+`17.0.18.0.0`
+-------------
+
+- Catalog run: button to retry error lines (reset to pending and reactivate
+  apply). Import now returns the created template by code and the real
+  exception message, so a failed create can be retried without waiting
+  for the next 6h catalog cycle.
+
 `17.0.17.0.0`
 -------------
 

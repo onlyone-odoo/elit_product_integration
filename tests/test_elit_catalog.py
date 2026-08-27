@@ -250,6 +250,21 @@ class TestElitCatalogStaging(TransactionCase):
         self.assertNotEqual(created.id, old_id)
         self.assertAlmostEqual(created.stock_elit, 11.0, places=2)
 
+    def test_retry_error_lines_resets_to_pending(self):
+        run = self.Run.create({"state": "apply"})
+        line = self.env["elit.catalog.line"].create(
+            {
+                "run_id": run.id,
+                "codigo": "ERR01",
+                "payload": "{}",
+                "state": "error",
+                "error_message": "Product was not created.",
+            }
+        )
+        run.action_retry_error_lines()
+        self.assertEqual(line.state, "pending")
+        self.assertFalse(line.error_message)
+
     def test_complete_snapshot_zeroes_missing_stock_and_recalcs_cost(self):
         kept = self._create_elit_product("KEPT01", stock_elit=15.0)
         extra = {}

@@ -678,15 +678,24 @@ class ElitSyncProcessor(models.AbstractModel):
             prepared = self._prepare_batch_context()
             if not prepared:
                 _logger.warning("ELIT _import_api_products: missing credentials.")
-                return {"processed": 0, "errors": 0, "seen_codes": set()}
+                return {
+                    "processed": 0,
+                    "errors": 0,
+                    "seen_codes": set(),
+                    "templates_by_code": {},
+                    "errors_by_code": {},
+                }
             partner, usd, ars, routes, ctx = prepared
 
+        templates_by_code = {}
+        errors_by_code = {}
         first_product_logged = False
         processed = 0
         errors = 0
         seen_codes = set()
         products_to_update_cost = self.env["product.template"]
         commit_interval = 20
+        Template = self.env["product.template"]
 
         for prod in products:
             codigo = (
@@ -709,22 +718,26 @@ class ElitSyncProcessor(models.AbstractModel):
                     tmpl = self._process_single_product(
                         prod, partner, usd, ars, routes, cotizacion, ctx
                     )
-                if tmpl:
-                    products_to_update_cost |= tmpl.with_context(
-                        active_test=False
-                    ).exists()
+                safe = Template._elit_template_for_write(tmpl) if tmpl else Template.browse()
+                if safe:
+                    templates_by_code[codigo] = safe
+                    alt = prod.get("codigo_producto")
+                    if alt and alt not in templates_by_code:
+                        templates_by_code[alt] = safe
+                    products_to_update_cost |= safe
                 processed += 1
                 seen_codes.add(codigo)
                 if commit_batches and processed % commit_interval == 0:
                     if products_to_update_cost:
-                        self.env["product.template"]._elit_update_cost_all_companies(
+                        Template._elit_update_cost_all_companies(
                             products_to_update_cost
                         )
-                        products_to_update_cost = self.env["product.template"]
+                        products_to_update_cost = Template
                     self.env.cr.commit()
                     _logger.debug("Committed %s products so far", processed)
             except Exception as e:
                 errors += 1
+                errors_by_code[codigo] = str(e)[:500]
                 _logger.error(
                     "Error processing product %s: %s",
                     codigo,
@@ -754,6 +767,8 @@ class ElitSyncProcessor(models.AbstractModel):
             "processed": processed,
             "errors": errors,
             "seen_codes": seen_codes,
+            "templates_by_code": templates_by_code,
+            "errors_by_code": errors_by_code,
         }
 
     @api.model

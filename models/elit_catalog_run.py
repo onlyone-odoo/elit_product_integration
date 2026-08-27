@@ -254,25 +254,37 @@ class ElitCatalogRun(models.Model):
                 commit_batches=False,
             )
             errors += import_stats.get("errors", 0)
-            created_map = {}
+            created_map = dict(import_stats.get("templates_by_code") or {})
+            errors_by_code = dict(import_stats.get("errors_by_code") or {})
             try:
-                created_map = Processor._elit_map_templates_by_api_codes(
-                    [line.codigo for line, _prod in to_import]
+                created_map.update(
+                    Processor._elit_map_templates_by_api_codes(
+                        [line.codigo for line, _prod in to_import]
+                    )
                 )
             except MissingError:
                 _logger.exception(
                     "ELIT apply: map after import hit a deleted record"
                 )
-            for line, _prod in to_import:
+            for line, prod in to_import:
                 tmpl = Template._elit_template_for_write(created_map.get(line.codigo))
+                if not tmpl:
+                    alt = prod.get("codigo_producto") or prod.get("codigo_alfa")
+                    if alt:
+                        tmpl = Template._elit_template_for_write(created_map.get(alt))
                 if tmpl:
                     line.write({"state": "done", "product_tmpl_id": tmpl.id})
                     processed += 1
                 elif line.state == "pending":
+                    detail = errors_by_code.get(line.codigo) or errors_by_code.get(
+                        prod.get("codigo_alfa") or ""
+                    )
                     line.write(
                         {
                             "state": "error",
-                            "error_message": _("Product was not created."),
+                            "error_message": (
+                                detail or _("Product was not created.")
+                            )[:500],
                         }
                     )
                     errors += 1
@@ -349,3 +361,44 @@ class ElitCatalogRun(models.Model):
                 self.id,
             )
         return len(missing)
+
+    def action_retry_error_lines(self):
+        """Reset error lines to pending and reactivate the apply cron."""
+        self.ensure_one()
+        errors = self.line_ids.filtered(lambda line: line.state == "error")
+        if not errors:
+            return {
+                "type": "ir.actions.client",
+                "tag": "display_notification",
+                "params": {
+                    "title": _("ELIT"),
+                    "message": _("There are no error lines to retry."),
+                    "type": "warning",
+                    "sticky": False,
+                },
+            }
+        errors.write({"state": "pending", "error_message": False})
+        if self.state in ("done", "ready", "failed"):
+            self.write(
+                {
+                    "state": "apply",
+                    "finished_at": False,
+                    "error_message": False,
+                }
+            )
+        self.env["elit.sync.processor"]._elit_ensure_cron_active(
+            "elit_product_integration.cron_elit_catalog_apply_batch"
+        )
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": _("ELIT"),
+                "message": _(
+                    "%s error line(s) queued for retry. Apply will run again."
+                )
+                % len(errors),
+                "type": "success",
+                "sticky": False,
+            },
+        }

@@ -9,6 +9,13 @@
                 <field name="state"/>
                 <field name="product_tmpl_id"/>
                 <field name="error_message" optional="show"/>
+                <button
+                    name="action_retry"
+                    type="object"
+                    string="Retry"
+                    icon="fa-refresh"
+                    invisible="state != 'error'"
+                />
             </tree>
         </field>
     </record>
@@ -33,6 +40,15 @@
         <field name="model">elit.catalog.run</field>
         <field name="arch" type="xml">
             <form>
+                <header>
+                    <button
+                        name="action_retry_error_lines"
+                        type="object"
+                        string="Reintentar líneas con error"
+                        class="btn-primary"
+                        invisible="state not in ('apply', 'done', 'ready')"
+                    />
+                </header>
                 <sheet>
                     <group>
                         <group>
