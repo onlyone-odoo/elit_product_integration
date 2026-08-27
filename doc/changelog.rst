@@ -1,3 +1,10 @@
+`17.0.19.0.0`
+-------------
+
+- If an ELIT SKU is new by code but its EAN already exists on another
+  product, update that product (stock, ELIT code, supplierinfo) and link
+  the catalog line to it instead of failing to create a duplicate.
+
 `17.0.18.0.0`
 -------------
 

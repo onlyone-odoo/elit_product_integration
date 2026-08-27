@@ -201,6 +201,10 @@ class ElitCatalogRun(models.Model):
             tmpl = Template._elit_template_for_write(
                 code_to_product.get(line.codigo)
             )
+            if not tmpl:
+                barcode = Template._elit_parse_barcode(prod)
+                if barcode:
+                    tmpl = Template._elit_find_template_by_barcode(barcode)
             if tmpl:
                 try:
                     Template._apply_elit_data_to_product(tmpl, prod, cotizacion)

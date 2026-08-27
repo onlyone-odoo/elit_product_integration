@@ -979,118 +979,148 @@ class ElitSyncProcessor(models.AbstractModel):
                 limit=1,
             )
 
-        # company_id explicit (configured or False=shared) for multi-company visibility
         elit_company_id = self.env["product.template"]._elit_get_company_id()
-        result_tmpl = None
         Template = self.env["product.template"]
+        tmpl = Template.browse()
+        if supplierinfo:
+            tmpl = Template._elit_template_from_supplierinfo(supplierinfo)
+        if not tmpl and barcode:
+            tmpl = Template._elit_find_template_by_barcode(barcode)
+            if tmpl:
+                _logger.info(
+                    "ELIT import: %s matched existing EAN %s on template %s",
+                    codigo,
+                    barcode,
+                    tmpl.id,
+                )
+
+        result_tmpl = None
         try:
-            if supplierinfo:
-                tmpl = Template._elit_template_from_supplierinfo(supplierinfo)
-                if tmpl:
-                    if not tmpl.active:
-                        vals = dict(vals, active=True)
-                    tmpl.write(vals)
-                    supplierinfo.write(
-                        {
-                            "price": precio_costo_with_tax,
-                            "currency_id": usd.id
-                            if moneda == 2
-                            else (ars.id or self.env.company.currency_id.id),
-                            "company_id": elit_company_id,
-                        }
-                    )
-                    result_tmpl = tmpl
-                else:
-                    tmpl = self.env["product.template"].create(vals)
-                    supplierinfo.write(
-                        {
-                            "product_tmpl_id": tmpl.id,
-                            "price": precio_costo_with_tax,
-                            "currency_id": usd.id
-                            if moneda == 2
-                            else (ars.id or self.env.company.currency_id.id),
-                            "company_id": elit_company_id,
-                        }
-                    )
-                    result_tmpl = tmpl
-            else:
-                tmpl = self.env["product.template"].create(vals)
-                self.env["product.supplierinfo"].create(
+            if tmpl:
+                if not tmpl.active:
+                    vals = dict(vals, active=True)
+                tmpl.write(vals)
+                self._elit_upsert_supplierinfo(
+                    partner,
+                    tmpl,
+                    codigo,
+                    prod,
+                    precio_costo_with_tax,
+                    moneda,
+                    usd,
+                    ars,
+                    elit_company_id,
+                    supplierinfo=supplierinfo,
+                )
+                result_tmpl = tmpl
+            elif supplierinfo:
+                tmpl = Template.create(vals)
+                supplierinfo.write(
                     {
-                        "partner_id": partner.id,
                         "product_tmpl_id": tmpl.id,
                         "product_code": codigo,
-                        "product_name": prod.get("nombre"),
                         "price": precio_costo_with_tax,
                         "currency_id": usd.id
                         if moneda == 2
                         else (ars.id or self.env.company.currency_id.id),
-                        "delay": 3,
                         "company_id": elit_company_id,
                     }
                 )
                 result_tmpl = tmpl
-        except ValidationError as e:
-            if (
-                "Códigos de barras ya asignados" in str(e)
-                or "barcode" in str(e).lower()
-            ):
-                existing_product = self.env["product.product"].search(
-                    [("barcode", "=", barcode)], limit=1
+            else:
+                tmpl = Template.create(vals)
+                self._elit_upsert_supplierinfo(
+                    partner,
+                    tmpl,
+                    codigo,
+                    prod,
+                    precio_costo_with_tax,
+                    moneda,
+                    usd,
+                    ars,
+                    elit_company_id,
                 )
-                if existing_product:
-                    existing_product.product_tmpl_id.write(vals)
-                    si = self.env["product.supplierinfo"].search(
-                        [
-                            ("partner_id", "=", partner.id),
-                            (
-                                "product_tmpl_id",
-                                "=",
-                                existing_product.product_tmpl_id.id,
-                            ),
-                        ],
-                        limit=1,
-                    )
-                    if si:
-                        si.write(
-                            {
-                                "price": precio_costo_with_tax,  # Adjusted
-                                "product_code": codigo,
-                                "company_id": elit_company_id,
-                            }
-                        )
-                    else:
-                        self.env["product.supplierinfo"].create(
-                            {
-                                "partner_id": partner.id,
-                                "product_tmpl_id": existing_product.product_tmpl_id.id,
-                                "product_code": codigo,
-                                "product_name": prod.get("nombre"),
-                                "price": precio_costo_with_tax,  # Adjusted
-                                "currency_id": usd.id
-                                if moneda == 2
-                                else (ars.id or self.env.company.currency_id.id),
-                                "delay": 3,
-                                "company_id": elit_company_id,
-                            }
-                        )
-                    result_tmpl = existing_product.product_tmpl_id
-                    _logger.info(
-                        "Duplicate barcode – product updated: %s (EAN: %s)",
-                        codigo,
-                        barcode,
-                    )
-                else:
+                result_tmpl = tmpl
+        except (ValidationError, UserError) as e:
+            msg = str(e).lower()
+            if barcode and (
+                "barcode" in msg
+                or "código de barras" in msg
+                or "codigos de barras" in msg
+            ):
+                tmpl = Template._elit_find_template_by_barcode(barcode)
+                if not tmpl:
                     _logger.error(
                         "Duplicate barcode but no existing product found: %s",
                         barcode,
                     )
+                    raise
+                if not tmpl.active:
+                    vals = dict(vals, active=True)
+                tmpl.write(vals)
+                self._elit_upsert_supplierinfo(
+                    partner,
+                    tmpl,
+                    codigo,
+                    prod,
+                    precio_costo_with_tax,
+                    moneda,
+                    usd,
+                    ars,
+                    elit_company_id,
+                    supplierinfo=supplierinfo,
+                )
+                result_tmpl = tmpl
+                _logger.info(
+                    "Duplicate barcode – product updated: %s (EAN: %s, tmpl %s)",
+                    codigo,
+                    barcode,
+                    tmpl.id,
+                )
             else:
                 raise
         except Exception as e:
             _logger.error("Unexpected error processing product %s: %s", codigo, e)
             raise
         return result_tmpl
+
+    def _elit_upsert_supplierinfo(
+        self,
+        partner,
+        tmpl,
+        codigo,
+        prod,
+        price,
+        moneda,
+        usd,
+        ars,
+        elit_company_id,
+        supplierinfo=None,
+    ):
+        """Create or update the ELIT supplierinfo line on *tmpl*."""
+        currency_id = (
+            usd.id if moneda == 2 else (ars.id or self.env.company.currency_id.id)
+        )
+        vals = {
+            "product_tmpl_id": tmpl.id,
+            "product_code": codigo,
+            "product_name": prod.get("nombre") or tmpl.name,
+            "price": price,
+            "currency_id": currency_id,
+            "company_id": elit_company_id,
+        }
+        if supplierinfo:
+            supplierinfo.write(vals)
+            return supplierinfo
+        existing = self.env["product.supplierinfo"].search(
+            [("partner_id", "=", partner.id), ("product_tmpl_id", "=", tmpl.id)],
+            limit=1,
+        )
+        if existing:
+            existing.write(vals)
+            return existing
+        vals.update({"partner_id": partner.id, "delay": 3})
+        return self.env["product.supplierinfo"].create(vals)
 
     @api.model
     def sync_elit_images_batch(self, batch_size=20):

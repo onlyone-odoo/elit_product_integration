@@ -35,8 +35,8 @@ class TestElitCatalogStaging(TransactionCase):
             "elit.partner_id", str(self.elit_partner.id)
         )
 
-    def _api_product(self, codigo, stock=10, precio=5.0, nombre=None):
-        return {
+    def _api_product(self, codigo, stock=10, precio=5.0, nombre=None, ean=None):
+        data = {
             "codigo_alfa": codigo,
             "codigo_producto": codigo,
             "nombre": nombre or codigo,
@@ -44,6 +44,9 @@ class TestElitCatalogStaging(TransactionCase):
             "precio": precio,
             "moneda": 2,
         }
+        if ean:
+            data["ean"] = ean
+        return data
 
     def _create_elit_product(self, codigo, stock_elit=10.0, extra=None):
         vals = {
@@ -264,6 +267,42 @@ class TestElitCatalogStaging(TransactionCase):
         run.action_retry_error_lines()
         self.assertEqual(line.state, "pending")
         self.assertFalse(line.error_message)
+
+    def test_apply_links_existing_product_by_ean(self):
+        """If the EAN already belongs to another product, update and link it."""
+        existing = self.Template.create(
+            {
+                "name": "Old adapter name",
+                "detailed_type": "product",
+                "barcode": "798302232648",
+                "default_code": "LOCAL-XTC",
+                "purchase_ok": True,
+                "sale_ok": True,
+            }
+        )
+        run = self.Run.create({"state": "ready", "cotizacion": 1.0})
+        self.env["elit.catalog.line"].create(
+            {
+                "run_id": run.id,
+                "codigo": "XTEADAXTC-564",
+                "payload": json.dumps(
+                    self._api_product(
+                        "XTEADAXTC-564",
+                        stock=78,
+                        nombre="Adaptador Xtech",
+                        ean="798302232648",
+                    )
+                ),
+            }
+        )
+        result = run.action_apply_one_batch(batch_size=80)
+        self.assertTrue(result.get("done"))
+        line = run.line_ids
+        self.assertEqual(line.state, "done")
+        self.assertEqual(line.product_tmpl_id, existing)
+        self.assertTrue(existing.is_elit_product)
+        self.assertEqual(existing.elit_product_code, "XTEADAXTC-564")
+        self.assertAlmostEqual(existing.stock_elit, 78.0, places=2)
 
     def test_complete_snapshot_zeroes_missing_stock_and_recalcs_cost(self):
         kept = self._create_elit_product("KEPT01", stock_elit=15.0)

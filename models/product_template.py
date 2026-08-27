@@ -588,6 +588,36 @@ class ProductTemplate(models.Model):
         tmpl_id = self._elit_sql_m2o_id(supplierinfo, "product_tmpl_id")
         return self._elit_browse_template_id(tmpl_id)
 
+    @api.model
+    def _elit_parse_barcode(self, elit_data):
+        """Return a usable EAN string from an ELIT API dict, or False."""
+        ean_raw = elit_data.get("ean") if isinstance(elit_data, dict) else None
+        if ean_raw is None:
+            return False
+        ean_str = str(ean_raw).strip()
+        if ean_str and ean_str != "0" and len(ean_str) >= 8:
+            return ean_str
+        return False
+
+    @api.model
+    def _elit_find_template_by_barcode(self, barcode):
+        """Return the template that already owns this EAN (archived included)."""
+        barcode = (barcode or "").strip()
+        if not barcode:
+            return self.browse()
+        variant = (
+            self.env["product.product"]
+            .with_context(active_test=False)
+            .search([("barcode", "=", barcode)], limit=1)
+        )
+        if variant:
+            tmpl_id = self._elit_sql_m2o_id(variant, "product_tmpl_id")
+            return self._elit_browse_template_id(tmpl_id)
+        tmpl = self.with_context(active_test=False).search(
+            [("barcode", "=", barcode)], limit=1
+        )
+        return self._elit_template_for_write(tmpl)
+
     def _apply_elit_data_to_product(self, product, elit_data, cotizacion):
         """Apply ELIT API data to a single product record.
 
@@ -637,6 +667,9 @@ class ProductTemplate(models.Model):
             "allow_out_of_stock_order": True,
             "elit_raw_data": self._elit_dump_raw_data(raw_payload),
         }
+        codigo = elit_data.get("codigo_alfa") or elit_data.get("codigo_producto")
+        if codigo:
+            write_vals["elit_product_code"] = codigo
         if not product.active:
             write_vals["active"] = True
         write_vals.update(self._elit_dimension_write_vals(elit_data))
