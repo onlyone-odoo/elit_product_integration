@@ -1,3 +1,11 @@
+`17.0.16.0.0`
+-------------
+
+- Catalog apply no longer aborts on archived products (MissingError
+  ``product.template(id,)``). Matching SKUs are unarchived and updated.
+- Apply does not commit/rollback the cursor via the legacy importer, so one
+  bad SKU cannot undo the rest of the batch.
+
 `17.0.15.0.0`
 -------------
 

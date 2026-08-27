@@ -189,7 +189,7 @@ class ElitSyncProcessor(models.AbstractModel):
         ``supplierinfo.product_code``, including hyphen-stripped and prefixed
         internal SKUs used by some resellers.
         """
-        Template = self.env["product.template"]
+        Template = self.env["product.template"].with_context(active_test=False)
         codes = [c for c in api_codes if c]
         if not codes:
             return {}
@@ -215,8 +215,9 @@ class ElitSyncProcessor(models.AbstractModel):
             used_ids.add(tmpl.id)
 
         def _sorted_candidates(recordset):
+            recordset = recordset.with_context(active_test=False).exists()
             return recordset.sorted(
-                key=lambda t: (not t.is_elit_product, t.id)
+                key=lambda t: (not t.active, not t.is_elit_product, t.id)
             )
 
         by_elit = {}
@@ -633,9 +634,12 @@ class ElitSyncProcessor(models.AbstractModel):
         ars=None,
         routes=None,
         ctx=None,
+        commit_batches=True,
     ):
         """Import/update product.template records from an already-fetched API page.
 
+        :param commit_batches: if False, do not commit/rollback the cursor
+            (catalog apply runs inside a larger transaction).
         :return: dict with processed, errors, seen_codes
         """
         if partner is None or usd is None or routes is None or ctx is None:
@@ -669,14 +673,17 @@ class ElitSyncProcessor(models.AbstractModel):
                 )
                 first_product_logged = True
             try:
-                tmpl = self._process_single_product(
-                    prod, partner, usd, ars, routes, cotizacion, ctx
-                )
+                with self.env.cr.savepoint():
+                    tmpl = self._process_single_product(
+                        prod, partner, usd, ars, routes, cotizacion, ctx
+                    )
                 if tmpl:
-                    products_to_update_cost |= tmpl
+                    products_to_update_cost |= tmpl.with_context(
+                        active_test=False
+                    ).exists()
                 processed += 1
                 seen_codes.add(codigo)
-                if processed % commit_interval == 0:
+                if commit_batches and processed % commit_interval == 0:
                     if products_to_update_cost:
                         self.env["product.template"]._elit_update_cost_all_companies(
                             products_to_update_cost
@@ -692,14 +699,18 @@ class ElitSyncProcessor(models.AbstractModel):
                     str(e),
                     exc_info=True,
                 )
-                self.env.cr.rollback()
+                if commit_batches:
+                    self.env.cr.rollback()
                 continue
 
+        products_to_update_cost = products_to_update_cost.with_context(
+            active_test=False
+        ).exists()
         if products_to_update_cost:
             self.env["product.template"]._elit_update_cost_all_companies(
                 products_to_update_cost
             )
-        if processed > 0 and processed % commit_interval != 0:
+        if commit_batches and processed > 0 and processed % commit_interval != 0:
             self.env.cr.commit()
 
         _logger.info(
@@ -924,19 +935,39 @@ class ElitSyncProcessor(models.AbstractModel):
         # company_id explicit (configured or False=shared) for multi-company visibility
         elit_company_id = self.env["product.template"]._elit_get_company_id()
         result_tmpl = None
+        Template = self.env["product.template"]
         try:
             if supplierinfo:
-                supplierinfo.product_tmpl_id.write(vals)
-                supplierinfo.write(
-                    {
-                        "price": precio_costo_with_tax,
-                        "currency_id": usd.id
-                        if moneda == 2
-                        else (ars.id or self.env.company.currency_id.id),
-                        "company_id": elit_company_id,
-                    }
+                tmpl = Template._elit_template_for_write(
+                    supplierinfo.with_context(active_test=False).product_tmpl_id
                 )
-                result_tmpl = supplierinfo.product_tmpl_id
+                if tmpl:
+                    if not tmpl.active:
+                        vals = dict(vals, active=True)
+                    tmpl.write(vals)
+                    supplierinfo.write(
+                        {
+                            "price": precio_costo_with_tax,
+                            "currency_id": usd.id
+                            if moneda == 2
+                            else (ars.id or self.env.company.currency_id.id),
+                            "company_id": elit_company_id,
+                        }
+                    )
+                    result_tmpl = tmpl
+                else:
+                    tmpl = self.env["product.template"].create(vals)
+                    supplierinfo.write(
+                        {
+                            "product_tmpl_id": tmpl.id,
+                            "price": precio_costo_with_tax,
+                            "currency_id": usd.id
+                            if moneda == 2
+                            else (ars.id or self.env.company.currency_id.id),
+                            "company_id": elit_company_id,
+                        }
+                    )
+                    result_tmpl = tmpl
             else:
                 tmpl = self.env["product.template"].create(vals)
                 self.env["product.supplierinfo"].create(

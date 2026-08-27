@@ -184,6 +184,25 @@ class TestElitCatalogStaging(TransactionCase):
         self.assertTrue(created)
         self.assertAlmostEqual(created.stock_elit, 8.0, places=2)
 
+    def test_apply_unarchives_existing_elit_product(self):
+        """Archived templates must be revived, not raise MissingError."""
+        product = self._create_elit_product("ARCH01", stock_elit=3.0)
+        product.active = False
+        run = self.Run.create({"state": "ready", "cotizacion": 1.0})
+        self.env["elit.catalog.line"].create(
+            {
+                "run_id": run.id,
+                "codigo": "ARCH01",
+                "payload": json.dumps(self._api_product("ARCH01", stock=9)),
+            }
+        )
+        result = run.action_apply_one_batch(batch_size=80)
+        self.assertTrue(result.get("done"))
+        product = product.with_context(active_test=False)
+        self.assertTrue(product.active)
+        self.assertAlmostEqual(product.stock_elit, 9.0, places=2)
+        self.assertEqual(run.state, "done")
+
     def test_complete_snapshot_zeroes_missing_stock_and_recalcs_cost(self):
         kept = self._create_elit_product("KEPT01", stock_elit=15.0)
         extra = {}

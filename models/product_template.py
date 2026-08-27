@@ -3,7 +3,7 @@ import json
 import requests
 import logging
 from odoo import _, fields, models, api
-from odoo.exceptions import UserError
+from odoo.exceptions import MissingError, UserError
 
 _logger = logging.getLogger(__name__)
 
@@ -534,6 +534,28 @@ class ProductTemplate(models.Model):
             [("name", "ilike", "ELIT")], limit=1
         )
 
+    @api.model
+    def _elit_template_for_write(self, product):
+        """Return an existing template, including archived, or empty.
+
+        Accessing an archived ``product.template`` via Many2one with the
+        default ``active_test=True`` raises MissingError ("record does not
+        exist or was deleted"). Catalog apply must revive those SKUs.
+        """
+        if not product:
+            return self.browse()
+        try:
+            product_id = product.id
+        except MissingError:
+            return self.browse()
+        if not product_id:
+            return self.browse()
+        found = self.with_context(active_test=False).browse(product_id)
+        try:
+            return found if found.exists() else self.browse()
+        except MissingError:
+            return self.browse()
+
     def _apply_elit_data_to_product(self, product, elit_data, cotizacion):
         """Apply ELIT API data to a single product record.
 
@@ -547,6 +569,9 @@ class ProductTemplate(models.Model):
         :param elit_data: dict from ELIT API
         :param cotizacion: USD exchange rate from API
         """
+        product = self._elit_template_for_write(product)
+        if not product:
+            return
         stock = float(elit_data.get("stock_total") or 0.0)
         precio = float(elit_data.get("precio") or 0.0)
         impuesto_interno = float(elit_data.get("impuesto_interno") or 0.0)
@@ -580,6 +605,8 @@ class ProductTemplate(models.Model):
             "allow_out_of_stock_order": True,
             "elit_raw_data": self._elit_dump_raw_data(raw_payload),
         }
+        if not product.active:
+            write_vals["active"] = True
         write_vals.update(self._elit_dimension_write_vals(elit_data))
         if image_url_elit:
             write_vals["elit_image_url"] = image_url_elit

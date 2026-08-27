@@ -181,7 +181,9 @@ class ElitCatalogRun(models.Model):
                 )
                 errors += 1
                 continue
-            tmpl = code_to_product.get(line.codigo)
+            tmpl = Template._elit_template_for_write(
+                code_to_product.get(line.codigo)
+            )
             if tmpl:
                 try:
                     Template._apply_elit_data_to_product(tmpl, prod, cotizacion)
@@ -192,13 +194,14 @@ class ElitCatalogRun(models.Model):
                     _logger.error(
                         "ELIT apply: error updating %s: %s", line.codigo, e
                     )
-                    line.write(
-                        {
-                            "state": "error",
-                            "error_message": str(e)[:500],
-                            "product_tmpl_id": tmpl.id,
-                        }
-                    )
+                    error_vals = {
+                        "state": "error",
+                        "error_message": str(e)[:500],
+                    }
+                    safe_tmpl = Template._elit_template_for_write(tmpl)
+                    if safe_tmpl:
+                        error_vals["product_tmpl_id"] = safe_tmpl.id
+                    line.write(error_vals)
                     errors += 1
             else:
                 to_import.append((line, prod))
@@ -208,13 +211,14 @@ class ElitCatalogRun(models.Model):
                 [prod for _line, prod in to_import],
                 cotizacion,
                 skip_existing=False,
+                commit_batches=False,
             )
             errors += import_stats.get("errors", 0)
             created_map = Processor._elit_map_templates_by_api_codes(
                 [line.codigo for line, _prod in to_import]
             )
             for line, _prod in to_import:
-                tmpl = created_map.get(line.codigo)
+                tmpl = Template._elit_template_for_write(created_map.get(line.codigo))
                 if tmpl:
                     line.write({"state": "done", "product_tmpl_id": tmpl.id})
                     processed += 1
@@ -227,6 +231,9 @@ class ElitCatalogRun(models.Model):
                     )
                     errors += 1
 
+        products_to_update_cost = products_to_update_cost.with_context(
+            active_test=False
+        ).exists()
         if products_to_update_cost:
             Template._elit_update_cost_all_companies(products_to_update_cost)
 
@@ -263,7 +270,8 @@ class ElitCatalogRun(models.Model):
         Only call after ingest completed (state ready/apply). Does not archive.
         """
         self.ensure_one()
-        seen_ids = self.line_ids.mapped("product_tmpl_id").ids
+        seen = self.line_ids.with_context(active_test=False).mapped("product_tmpl_id")
+        seen_ids = seen.exists().ids
         domain = [("is_elit_product", "=", True)]
         if seen_ids:
             domain.append(("id", "not in", seen_ids))
