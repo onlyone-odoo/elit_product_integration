@@ -5,6 +5,7 @@ import json
 import logging
 
 from odoo import _, api, fields, models
+from odoo.exceptions import MissingError
 
 _logger = logging.getLogger(__name__)
 
@@ -159,7 +160,23 @@ class ElitCatalogRun(models.Model):
         Template = self.env["product.template"]
         cotizacion = float(self.cotizacion or 1.0)
         codes = [line.codigo for line in lines if line.codigo]
-        code_to_product = Processor._elit_map_templates_by_api_codes(codes)
+        try:
+            code_to_product = Processor._elit_map_templates_by_api_codes(codes)
+        except MissingError:
+            _logger.exception(
+                "ELIT apply: bulk map hit a deleted record, mapping per code"
+            )
+            code_to_product = {}
+            for code in codes:
+                try:
+                    code_to_product.update(
+                        Processor._elit_map_templates_by_api_codes([code])
+                    )
+                except MissingError:
+                    _logger.warning(
+                        "ELIT apply: skip map for %s (deleted related record)",
+                        code,
+                    )
 
         processed = 0
         errors = 0
@@ -190,6 +207,29 @@ class ElitCatalogRun(models.Model):
                     line.write({"state": "done", "product_tmpl_id": tmpl.id})
                     products_to_update_cost |= tmpl
                     processed += 1
+                except MissingError:
+                    if Template._elit_template_for_write(tmpl):
+                        _logger.warning(
+                            "ELIT apply: %s kept but a related record was deleted: %s",
+                            line.codigo,
+                            tmpl.id,
+                        )
+                        line.write(
+                            {
+                                "state": "error",
+                                "error_message": _(
+                                    "A related product record was deleted."
+                                ),
+                                "product_tmpl_id": tmpl.id,
+                            }
+                        )
+                        errors += 1
+                    else:
+                        _logger.warning(
+                            "ELIT apply: %s template was deleted, recreating",
+                            line.codigo,
+                        )
+                        to_import.append((line, prod))
                 except Exception as e:
                     _logger.error(
                         "ELIT apply: error updating %s: %s", line.codigo, e
@@ -214,9 +254,15 @@ class ElitCatalogRun(models.Model):
                 commit_batches=False,
             )
             errors += import_stats.get("errors", 0)
-            created_map = Processor._elit_map_templates_by_api_codes(
-                [line.codigo for line, _prod in to_import]
-            )
+            created_map = {}
+            try:
+                created_map = Processor._elit_map_templates_by_api_codes(
+                    [line.codigo for line, _prod in to_import]
+                )
+            except MissingError:
+                _logger.exception(
+                    "ELIT apply: map after import hit a deleted record"
+                )
             for line, _prod in to_import:
                 tmpl = Template._elit_template_for_write(created_map.get(line.codigo))
                 if tmpl:
@@ -234,8 +280,14 @@ class ElitCatalogRun(models.Model):
         products_to_update_cost = products_to_update_cost.with_context(
             active_test=False
         ).exists()
-        if products_to_update_cost:
-            Template._elit_update_cost_all_companies(products_to_update_cost)
+        for product in products_to_update_cost:
+            try:
+                Template._elit_update_cost_all_companies(product)
+            except MissingError:
+                _logger.warning(
+                    "ELIT apply: skip cost update for deleted product %s",
+                    product.id,
+                )
 
         remaining = self.env["elit.catalog.line"].search_count(
             [("run_id", "=", self.id), ("state", "=", "pending")]
@@ -270,8 +322,18 @@ class ElitCatalogRun(models.Model):
         Only call after ingest completed (state ready/apply). Does not archive.
         """
         self.ensure_one()
-        seen = self.line_ids.with_context(active_test=False).mapped("product_tmpl_id")
-        seen_ids = seen.exists().ids
+        Template = self.env["product.template"].with_context(active_test=False)
+        self.env.cr.execute(
+            """
+            SELECT DISTINCT product_tmpl_id
+              FROM elit_catalog_line
+             WHERE run_id = %s
+               AND product_tmpl_id IS NOT NULL
+            """,
+            [self.id],
+        )
+        raw_ids = [row[0] for row in self.env.cr.fetchall() if row[0]]
+        seen_ids = Template.browse(raw_ids).exists().ids
         domain = [("is_elit_product", "=", True)]
         if seen_ids:
             domain.append(("id", "not in", seen_ids))

@@ -535,26 +535,58 @@ class ProductTemplate(models.Model):
         )
 
     @api.model
-    def _elit_template_for_write(self, product):
-        """Return an existing template, including archived, or empty.
+    def _elit_sql_m2o_id(self, record, field_name):
+        """Return a Many2one database id without fetching the comodel.
 
-        Accessing an archived ``product.template`` via Many2one with the
-        default ``active_test=True`` raises MissingError ("record does not
-        exist or was deleted"). Catalog apply must revive those SKUs.
+        A dangling FK (comodel row really deleted) raises MissingError on
+        normal field access / name_get. SQL reads the column only.
         """
-        if not product:
+        if not record:
+            return False
+        field = record._fields.get(field_name)
+        if not field:
+            return False
+        record.flush_recordset([field_name])
+        self.env.cr.execute(
+            'SELECT "%s" FROM "%s" WHERE id = %%s'
+            % (field.name, record._table),
+            [record.id],
+        )
+        row = self.env.cr.fetchone()
+        return row[0] if row else False
+
+    @api.model
+    def _elit_browse_template_id(self, tmpl_id):
+        """Browse a template id if it still exists (archived allowed)."""
+        if not tmpl_id:
             return self.browse()
-        try:
-            product_id = product.id
-        except MissingError:
-            return self.browse()
-        if not product_id:
-            return self.browse()
-        found = self.with_context(active_test=False).browse(product_id)
+        found = self.with_context(active_test=False).browse(int(tmpl_id))
         try:
             return found if found.exists() else self.browse()
         except MissingError:
             return self.browse()
+
+    @api.model
+    def _elit_template_for_write(self, product):
+        """Return an existing template, including archived, or empty.
+
+        Handles archived rows (active_test) and truly deleted ids
+        (MissingError / exists() is False). Catalog apply recreates the
+        latter from the ELIT payload.
+        """
+        if not product:
+            return self.browse()
+        try:
+            product_id = product if isinstance(product, int) else product.id
+        except MissingError:
+            return self.browse()
+        return self._elit_browse_template_id(product_id)
+
+    @api.model
+    def _elit_template_from_supplierinfo(self, supplierinfo):
+        """Template linked to supplierinfo, ignoring dangling FKs."""
+        tmpl_id = self._elit_sql_m2o_id(supplierinfo, "product_tmpl_id")
+        return self._elit_browse_template_id(tmpl_id)
 
     def _apply_elit_data_to_product(self, product, elit_data, cotizacion):
         """Apply ELIT API data to a single product record.

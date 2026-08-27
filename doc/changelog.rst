@@ -1,3 +1,10 @@
+`17.0.17.0.0`
+-------------
+
+- Catalog apply survives **deleted** (not only archived) ``product.template``
+  rows: dangling supplierinfo FKs are ignored, mapping skips missing
+  records, and the SKU is created again from the ELIT payload.
+
 `17.0.16.0.0`
 -------------
 

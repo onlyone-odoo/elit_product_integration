@@ -203,6 +203,53 @@ class TestElitCatalogStaging(TransactionCase):
         self.assertAlmostEqual(product.stock_elit, 9.0, places=2)
         self.assertEqual(run.state, "done")
 
+    def test_apply_recreates_when_template_was_unlinked(self):
+        """Deleted templates must be created again from the ELIT payload."""
+        product = self._create_elit_product("DEL01", stock_elit=3.0)
+        old_id = product.id
+        product.unlink()
+        run = self.Run.create({"state": "ready", "cotizacion": 1.0})
+        self.env["elit.catalog.line"].create(
+            {
+                "run_id": run.id,
+                "codigo": "DEL01",
+                "payload": json.dumps(
+                    self._api_product("DEL01", stock=11, nombre="Recreated SKU")
+                ),
+            }
+        )
+
+        def fake_import(_self, products, cotizacion, skip_existing=False, **kwargs):
+            for prod in products:
+                codigo = prod.get("codigo_alfa")
+                self.Template.create(
+                    {
+                        "name": prod.get("nombre") or codigo,
+                        "detailed_type": "product",
+                        "default_code": codigo,
+                        "elit_product_code": codigo,
+                        "is_elit_product": True,
+                        "stock_elit": float(prod.get("stock_total") or 0),
+                    }
+                )
+            return {
+                "processed": len(products),
+                "errors": 0,
+                "seen_codes": set(),
+            }
+
+        with patch.object(
+            type(self.processor),
+            "_import_api_products",
+            fake_import,
+        ):
+            result = run.action_apply_one_batch(batch_size=80)
+        self.assertTrue(result.get("done"))
+        created = self.Template.search([("elit_product_code", "=", "DEL01")], limit=1)
+        self.assertTrue(created)
+        self.assertNotEqual(created.id, old_id)
+        self.assertAlmostEqual(created.stock_elit, 11.0, places=2)
+
     def test_complete_snapshot_zeroes_missing_stock_and_recalcs_cost(self):
         kept = self._create_elit_product("KEPT01", stock_elit=15.0)
         extra = {}

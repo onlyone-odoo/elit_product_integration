@@ -6,7 +6,7 @@ import json
 from datetime import timedelta
 
 from odoo import _, models, api, fields
-from odoo.exceptions import UserError, ValidationError
+from odoo.exceptions import MissingError, UserError, ValidationError
 from odoo.osv import expression
 
 _logger = logging.getLogger(__name__)
@@ -209,13 +209,26 @@ class ElitSyncProcessor(models.AbstractModel):
         used_ids = set()
 
         def _assign(codigo, tmpl):
-            if codigo in mapped or tmpl.id in used_ids:
+            if not tmpl or codigo in mapped or tmpl.id in used_ids:
                 return
             mapped[codigo] = tmpl
             used_ids.add(tmpl.id)
 
         def _sorted_candidates(recordset):
-            recordset = recordset.with_context(active_test=False).exists()
+            recordset = recordset.with_context(
+                active_test=False, prefetch_fields=False
+            )
+            try:
+                recordset = recordset.exists()
+            except MissingError:
+                alive_ids = []
+                for rec in recordset.browse(recordset.ids):
+                    try:
+                        if rec.exists():
+                            alive_ids.append(rec.id)
+                    except MissingError:
+                        continue
+                recordset = recordset.browse(alive_ids)
             return recordset.sorted(
                 key=lambda t: (not t.active, not t.is_elit_product, t.id)
             )
@@ -224,22 +237,32 @@ class ElitSyncProcessor(models.AbstractModel):
         by_default = {}
         by_seller = {}
         for tmpl in _sorted_candidates(templates):
-            if tmpl.elit_product_code and tmpl.elit_product_code not in by_elit:
-                by_elit[tmpl.elit_product_code] = tmpl
-                elit_n = processor._elit_normalize_vendor_code(tmpl.elit_product_code)
-                if elit_n and elit_n not in by_elit:
-                    by_elit[elit_n] = tmpl
-            if tmpl.default_code and tmpl.default_code not in by_default:
-                by_default[tmpl.default_code] = tmpl
-                def_n = processor._elit_normalize_vendor_code(tmpl.default_code)
-                if def_n and def_n not in by_default:
-                    by_default[def_n] = tmpl
-            for seller in tmpl.seller_ids:
-                if seller.product_code and seller.product_code not in by_seller:
-                    by_seller[seller.product_code] = tmpl
-                    sell_n = processor._elit_normalize_vendor_code(seller.product_code)
-                    if sell_n and sell_n not in by_seller:
-                        by_seller[sell_n] = tmpl
+            try:
+                tmpl = tmpl.with_context(prefetch_fields=False)
+                if tmpl.elit_product_code and tmpl.elit_product_code not in by_elit:
+                    by_elit[tmpl.elit_product_code] = tmpl
+                    elit_n = processor._elit_normalize_vendor_code(tmpl.elit_product_code)
+                    if elit_n and elit_n not in by_elit:
+                        by_elit[elit_n] = tmpl
+                if tmpl.default_code and tmpl.default_code not in by_default:
+                    by_default[tmpl.default_code] = tmpl
+                    def_n = processor._elit_normalize_vendor_code(tmpl.default_code)
+                    if def_n and def_n not in by_default:
+                        by_default[def_n] = tmpl
+                for seller in tmpl.seller_ids:
+                    if seller.product_code and seller.product_code not in by_seller:
+                        by_seller[seller.product_code] = tmpl
+                        sell_n = processor._elit_normalize_vendor_code(
+                            seller.product_code
+                        )
+                        if sell_n and sell_n not in by_seller:
+                            by_seller[sell_n] = tmpl
+            except MissingError:
+                _logger.warning(
+                    "ELIT map: skip template %s (related record was deleted)",
+                    tmpl.id if tmpl else "?",
+                )
+                continue
 
         for codigo in codes:
             for pool in (by_elit, by_default, by_seller):
@@ -267,17 +290,26 @@ class ElitSyncProcessor(models.AbstractModel):
                 for tmpl in _sorted_candidates(extra):
                     if tmpl.id in used_ids:
                         continue
-                    seller_codes = tmpl.seller_ids.mapped("product_code")
-                    if (
-                        processor._elit_code_matches(tmpl.elit_product_code, codigo)
-                        or processor._elit_code_matches(tmpl.default_code, codigo)
-                        or any(
-                            processor._elit_code_matches(code, codigo)
-                            for code in seller_codes
+                    try:
+                        tmpl = tmpl.with_context(prefetch_fields=False)
+                        seller_codes = tmpl.seller_ids.mapped("product_code")
+                        if (
+                            processor._elit_code_matches(tmpl.elit_product_code, codigo)
+                            or processor._elit_code_matches(tmpl.default_code, codigo)
+                            or any(
+                                processor._elit_code_matches(code, codigo)
+                                for code in seller_codes
+                            )
+                        ):
+                            _assign(codigo, tmpl)
+                            break
+                    except MissingError:
+                        _logger.warning(
+                            "ELIT map: skip template %s while matching %s",
+                            tmpl.id if tmpl else "?",
+                            codigo,
                         )
-                    ):
-                        _assign(codigo, tmpl)
-                        break
+                        continue
         return mapped
 
     @api.model
@@ -938,9 +970,7 @@ class ElitSyncProcessor(models.AbstractModel):
         Template = self.env["product.template"]
         try:
             if supplierinfo:
-                tmpl = Template._elit_template_for_write(
-                    supplierinfo.with_context(active_test=False).product_tmpl_id
-                )
+                tmpl = Template._elit_template_from_supplierinfo(supplierinfo)
                 if tmpl:
                     if not tmpl.active:
                         vals = dict(vals, active=True)
